@@ -1,0 +1,130 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with role and department information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["student", "dept_head", "core_team", "system_admin"] },
+        "department": { "type": "string" },
+        "year": { "type": "integer" },
+        "name": { "type": "string" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Department": {
+      "title": "Department",
+      "description": "University department",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "competencyIds": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["id", "name"]
+    },
+    "Competency": {
+      "title": "Competency",
+      "description": "A skill or competency being assessed",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "minimumScore": { "type": "integer" }
+      },
+      "required": ["id", "name", "departmentId", "minimumScore"]
+    },
+    "Question": {
+      "title": "Question",
+      "description": "An assessment question",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "competencyId": { "type": "string" },
+        "text": { "type": "string" },
+        "options": { "type": "array", "items": { "type": "string" } },
+        "correctOption": { "type": "integer" },
+        "difficulty": { "type": "string", "enum": ["easy", "medium", "hard"] },
+        "createdBy": { "type": "string" },
+        "approvalStatus": { "type": "string", "enum": ["pending", "approved", "rejected"] }
+      },
+      "required": ["id", "competencyId", "text", "options", "correctOption", "createdBy", "approvalStatus"]
+    },
+    "Assessment": {
+      "title": "Assessment",
+      "description": "A collection of questions for a specific group",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "competencyDistribution": { "type": "object" },
+        "timeLimit": { "type": "integer" },
+        "active": { "type": "boolean" },
+        "scheduledAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "departmentId", "competencyDistribution", "timeLimit", "active"]
+    },
+    "Attempt": {
+      "title": "Attempt",
+      "description": "A student's attempt at an assessment",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "assessmentId": { "type": "string" },
+        "startTime": { "type": "string", "format": "date-time" },
+        "endTime": { "type": "string", "format": "date-time" },
+        "ipAddress": { "type": "string" },
+        "deviceMetadata": { "type": "string" },
+        "answers": { "type": "object" },
+        "skillScores": { "type": "object" },
+        "overallScore": { "type": "integer" },
+        "certificationStatus": { "type": "string", "enum": ["none", "certified", "failed"] },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "assessmentId", "startTime", "ipAddress", "deviceMetadata", "answers", "skillScores", "overallScore", "certificationStatus", "timestamp"]
+    },
+    "Certification": {
+      "title": "Certification",
+      "description": "A student's certification record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "studentId": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "overallScore": { "type": "integer" },
+        "competencyScores": { "type": "object" },
+        "issuedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "studentId", "departmentId", "overallScore", "competencyScores", "issuedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable log of sensitive actions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "action": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "metadata": { "type": "object" }
+      },
+      "required": ["id", "userId", "action", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": { "schema": "User", "description": "User profiles" },
+    "/departments/{id}": { "schema": "Department", "description": "University departments" },
+    "/competencies/{id}": { "schema": "Competency", "description": "Competency definitions" },
+    "/questions/{id}": { "schema": "Question", "description": "Question bank" },
+    "/assessments/{id}": { "schema": "Assessment", "description": "Assessment configurations" },
+    "/attempts/{id}": { "schema": "Attempt", "description": "Student assessment attempts" },
+    "/certifications/{id}": { "schema": "Certification", "description": "Certification records" },
+    "/audit_logs/{id}": { "schema": "AuditLog", "description": "System audit logs" }
+  }
+}
