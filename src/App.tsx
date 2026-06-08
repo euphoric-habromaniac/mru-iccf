@@ -2663,7 +2663,7 @@ function ScorecardView({
 // --- Admin Management ---
 
 function AdminManagement({ user, competencies, assessments, departments, onBack }: { user: User; competencies: Competency[]; assessments: Assessment[]; departments: any[]; onBack: () => void }) {
-  const [activeTab, setActiveTab] = useState<'departments' | 'competencies' | 'assessments' | 'approvals' | 'logs'>('departments');
+  const [activeTab, setActiveTab] = useState<'departments' | 'competencies' | 'assessments' | 'question_bank' | 'logs'>('departments');
   const [pendingQuestions, setPendingQuestions] = useState<QuestionLike[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   
@@ -3063,7 +3063,7 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
           { id: 'departments', label: 'Departments', icon: <Building2 className="w-4 h-4" /> },
           { id: 'competencies', label: 'Competencies', icon: <BookOpen className="w-4 h-4" /> },
           { id: 'assessments', label: 'Assessments', icon: <ClipboardList className="w-4 h-4" /> },
-          { id: 'approvals', label: 'Question Bank', icon: <Database className="w-4 h-4" />, count: pendingQuestions.length },
+          { id: 'question_bank', label: 'Question Bank', icon: <Database className="w-4 h-4" />, count: pendingQuestions.length },
           ...(user.role === 'core_team' ? [{ id: 'logs', label: 'Audit Logs', icon: <History className="w-4 h-4" /> }] : []),
         ].map(tab => (
           <button
