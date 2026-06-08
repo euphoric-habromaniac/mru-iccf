@@ -77,6 +77,7 @@ export interface Assessment {
   assessmentType?: AssessmentType;
   assessment_type?: AssessmentType;
   competencyIds?: string[];
+  questionIds?: string[];
 }
 
 export interface SkillScore {
