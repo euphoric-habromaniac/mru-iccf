@@ -904,7 +904,28 @@ function StudentDashboard({ user, assessments, attempts: rawAttempts, competenci
       return point;
     });
 
-  const chartColors = ['#F27D26', '#3b82f6', '#10b981', '#f43f5e', '#8b5cf6', '#eab308', '#ec4899', '#06b6d4', '#14b8a6', '#6366f1'];
+  const chartColors = [
+    '#F27D26', // Orange (Brand)
+    '#38BDF8', // Light Blue
+    '#34D399', // Emerald
+    '#FB7185', // Rose
+    '#A78BFA', // Purple
+    '#FBBF24', // Amber
+    '#E879F9', // Fuchsia
+    '#2DD4BF', // Teal
+    '#818CF8', // Indigo
+    '#A3E635', // Lime
+    '#F87171', // Red
+    '#60A5FA', // Blue
+    '#C084FC', // Violet
+    '#FBB6CE', // Pink
+    '#94A3B8', // Slate
+    '#FDE047', // Yellow
+    '#6EE7B7', // Mint
+    '#93C5FD', // Ice Blue
+    '#FCA5A5', // Salmon
+    '#D8B4FE'  // Lavender
+  ];
 
   const reportData = Object.entries(bestSkillScores)
     .map(([compId, scoreVal]) => ({
