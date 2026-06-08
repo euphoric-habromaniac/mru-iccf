@@ -4,7 +4,7 @@ import { doc, getDoc, setDoc, onSnapshot, collection, query, where, writeBatch, 
 import { auth, db, googleProvider } from './firebase';
 import { Toaster, toast } from 'sonner';
 import { User, Role, Competency, Assessment, Attempt, Certification, Question, SkillScore, CompositeScore } from './types';
-import { LogIn, LogOut, Shield, GraduationCap, Building2, LayoutDashboard, ClipboardList, BarChart3, Settings, Plus, Trash2, CheckCircle2, AlertCircle, Clock, Search, Filter, ArrowRight, User as UserIcon, BookOpen, Award, History, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, X, Menu } from 'lucide-react';
+import { LogIn, LogOut, Shield, GraduationCap, Building2, LayoutDashboard, ClipboardList, BarChart3, Settings, Plus, Trash2, CheckCircle2, AlertCircle, Clock, Search, Filter, ArrowRight, User as UserIcon, BookOpen, Award, History, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, X, Menu, Database } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip, LineChart, Line, XAxis, YAxis, CartesianGrid, BarChart, Bar } from 'recharts';
 import { jsPDF } from 'jspdf';
@@ -1275,20 +1275,30 @@ function AssessmentView({ assessment, competencies, onComplete, onCancel, user }
 
           let selected: QuestionLike[] = [];
 
-          if (assessmentType === 'likert') {
-            Object.entries(assessment.competencyDistribution).forEach(([compId, count]) => {
-              const compQuestions = allApprovedQuestions.filter((question) => {
-                return getQuestionCompetencyId(question) === compId && isLikertQuestion(question);
-              });
-              selected = [...selected, ...shuffleArray(compQuestions).slice(0, count)];
-            });
+          if (assessment.questionIds && assessment.questionIds.length > 0) {
+            // Explicitly selected questions mode
+            selected = allApprovedQuestions.filter(q => assessment.questionIds?.includes(q.id));
+            
+            // Re-order to match the specified order if needed, but randomly is fine for now unless ordered is required.
+            // But let's shuffle them for good measure if they are MCQ.
+            selected = shuffleArray(selected);
           } else {
-            Object.entries(assessment.competencyDistribution).forEach(([compId, count]) => {
-              const compQuestions = allApprovedQuestions.filter((question) => {
-                return getQuestionCompetencyId(question) === compId && !isLikertQuestion(question);
+            // Legacy/Dynamic mode: random pulling based on competencyDistribution
+            if (assessmentType === 'likert') {
+              Object.entries(assessment.competencyDistribution).forEach(([compId, count]) => {
+                const compQuestions = allApprovedQuestions.filter((question) => {
+                  return getQuestionCompetencyId(question) === compId && isLikertQuestion(question);
+                });
+                selected = [...selected, ...shuffleArray(compQuestions).slice(0, count)];
               });
-              selected = [...selected, ...shuffleArray(compQuestions).slice(0, count)];
-            });
+            } else {
+              Object.entries(assessment.competencyDistribution).forEach(([compId, count]) => {
+                const compQuestions = allApprovedQuestions.filter((question) => {
+                  return getQuestionCompetencyId(question) === compId && !isLikertQuestion(question);
+                });
+                selected = [...selected, ...shuffleArray(compQuestions).slice(0, count)];
+              });
+            }
           }
 
           if (selected.length === 0) {
@@ -2656,6 +2666,13 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
   const [activeTab, setActiveTab] = useState<'departments' | 'competencies' | 'assessments' | 'approvals' | 'logs'>('departments');
   const [pendingQuestions, setPendingQuestions] = useState<QuestionLike[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  
+  // Question Bank State
+  const [allQuestions, setAllQuestions] = useState<QuestionLike[]>([]);
+  const [questionSearchQuery, setQuestionSearchQuery] = useState('');
+  const [questionFilterType, setQuestionFilterType] = useState('all');
+  const [questionFilterStatus, setQuestionFilterStatus] = useState('all');
+  const [questionFilterCompetency, setQuestionFilterCompetency] = useState('all');
   const [newQuestionType, setNewQuestionType] = useState<'mcq' | 'likert' | 'scenario_mcq' | 'ranking' | 'text_answer'>('mcq');
   const [newQuestionText, setNewQuestionText] = useState('');
   const [newQuestionCompetencyId, setNewQuestionCompetencyId] = useState('');
@@ -2672,6 +2689,165 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
   
   const [savingQuestion, setSavingQuestion] = useState(false);
 
+  // --- New Modal States ---
+  const [showDeptModal, setShowDeptModal] = useState(false);
+  const [newDeptName, setNewDeptName] = useState('');
+
+  const [showCompModal, setShowCompModal] = useState(false);
+  const [newCompName, setNewCompName] = useState('');
+  const [newCompDeptId, setNewCompDeptId] = useState('');
+
+  const [showAssessmentModal, setShowAssessmentModal] = useState(false);
+  const [editingAssessment, setEditingAssessment] = useState<Assessment | null>(null);
+  const [assessmentForm, setAssessmentForm] = useState({
+    name: '',
+    departmentId: '',
+    timeLimit: 30,
+    minScore: 60,
+    active: false,
+    competencyDistribution: {} as Record<string, number>
+  });
+  const [assessmentModalTab, setAssessmentModalTab] = useState<'settings' | 'questions'>('settings');
+  const [assessmentSelectedQuestions, setAssessmentSelectedQuestions] = useState<string[]>([]);
+  const [showQuestionSelector, setShowQuestionSelector] = useState(false);
+
+  const [showQuestionsModal, setShowQuestionsModal] = useState<Assessment | null>(null);
+  const [assessmentQuestions, setAssessmentQuestions] = useState<QuestionLike[]>([]);
+
+  const handleAddDepartment = async () => {
+    if (!newDeptName.trim()) return;
+    const id = newDeptName.trim().toLowerCase().replace(/[^a-z0-9]/g, '-');
+    try {
+      await setDoc(doc(db, 'departments', id), { name: newDeptName.trim() });
+      toast.success('Department added');
+      setShowDeptModal(false);
+      setNewDeptName('');
+    } catch (e: any) {
+      handleFirestoreError(e, 'add_dept', 'departments');
+    }
+  };
+
+  const handleRenameDepartment = async (id: string, newName: string) => {
+    try {
+      await setDoc(doc(db, 'departments', id), { name: newName }, { merge: true });
+      toast.success('Department renamed');
+    } catch (e: any) {
+      handleFirestoreError(e, 'rename_dept', 'departments');
+    }
+  };
+
+  const handleDeleteDepartment = async (id: string) => {
+    // Note: in a real app, you would check for associated competencies and assessments before deleting.
+    try {
+      // deleting from firestore
+      const { deleteDoc } = await import('firebase/firestore');
+      await deleteDoc(doc(db, 'departments', id));
+      toast.success('Department deleted');
+    } catch (e: any) {
+      handleFirestoreError(e, 'delete_dept', 'departments');
+    }
+  };
+
+  const handleAddCompetency = async () => {
+    if (!newCompName.trim()) return;
+    const id = newCompName.trim().toLowerCase().replace(/[^a-z0-9]/g, '-');
+    try {
+      await setDoc(doc(db, 'competencies', id), { 
+        name: newCompName.trim(),
+        departmentId: newCompDeptId 
+      });
+      toast.success('Competency added');
+      setShowCompModal(false);
+      setNewCompName('');
+      setNewCompDeptId('');
+    } catch (e: any) {
+      handleFirestoreError(e, 'add_comp', 'competencies');
+    }
+  };
+
+  const handleSaveAssessment = async () => {
+    if (!assessmentForm.name.trim() || !assessmentForm.departmentId) return;
+    try {
+      const id = editingAssessment ? editingAssessment.id : `ast_${Date.now()}`;
+      
+      // Auto-calculate competency distribution from selected questions
+      const cleanedDist: Record<string, number> = {};
+      if (assessmentSelectedQuestions.length > 0) {
+        assessmentSelectedQuestions.forEach(qId => {
+          const q = allQuestions.find(aq => aq.id === qId);
+          if (q) {
+            const compId = getQuestionCompetencyId(q);
+            cleanedDist[compId] = (cleanedDist[compId] || 0) + 1;
+          }
+        });
+      } else {
+        for (const [k, v] of Object.entries(assessmentForm.competencyDistribution) as [string, number][]) {
+          if (v > 0) cleanedDist[k] = v;
+        }
+      }
+
+      const payload: Partial<Assessment> = {
+        name: assessmentForm.name.trim(),
+        departmentId: assessmentForm.departmentId,
+        timeLimit: assessmentForm.timeLimit,
+        minScore: assessmentForm.minScore,
+        active: assessmentForm.active,
+        competencyDistribution: cleanedDist,
+        questionIds: assessmentSelectedQuestions
+      };
+      await setDoc(doc(db, 'assessments', id), payload, { merge: true });
+      toast.success(editingAssessment ? 'Assessment updated' : 'Assessment created');
+      setShowAssessmentModal(false);
+    } catch (e: any) {
+      handleFirestoreError(e, 'save_assessment', 'assessments');
+    }
+  };
+
+  const openEditAssessment = (a: Assessment) => {
+    setEditingAssessment(a);
+    setAssessmentForm({
+      name: a.name,
+      departmentId: a.departmentId,
+      timeLimit: a.timeLimit || 30,
+      minScore: a.minScore,
+      active: a.active,
+      competencyDistribution: a.competencyDistribution || {}
+    });
+    setAssessmentSelectedQuestions(a.questionIds || []);
+    setAssessmentModalTab('settings');
+    setShowQuestionSelector(false);
+    setShowAssessmentModal(true);
+  };
+
+  const openCreateAssessment = () => {
+    setEditingAssessment(null);
+    setAssessmentForm({
+      name: '',
+      departmentId: departments[0]?.id || '',
+      timeLimit: 30,
+      minScore: 60,
+      active: false,
+      competencyDistribution: {}
+    });
+    setAssessmentSelectedQuestions([]);
+    setAssessmentModalTab('settings');
+    setShowQuestionSelector(false);
+    setShowAssessmentModal(true);
+  };
+
+  const viewQuestions = async (a: Assessment) => {
+    setShowQuestionsModal(a);
+    try {
+      const q = query(collection(db, 'questions'), where('approvalStatus', '==', 'approved'));
+      const snapshot = await getDocs(q);
+      const allApproved = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as QuestionLike[];
+      const relevant = allApproved.filter(q => Object.keys(a.competencyDistribution).includes(getQuestionCompetencyId(q)));
+      setAssessmentQuestions(relevant);
+    } catch (e: any) {
+      handleFirestoreError(e, 'fetch_assessment_questions', 'questions');
+    }
+  };
+
   useEffect(() => {
     if (!newQuestionCompetencyId && competencies.length > 0) {
       setNewQuestionCompetencyId(competencies[0].id);
@@ -2679,10 +2855,12 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
   }, [competencies, newQuestionCompetencyId]);
 
   useEffect(() => {
-    const q = query(collection(db, 'questions'), where('approvalStatus', '==', 'pending'));
+    const q = query(collection(db, 'questions'));
     const unsub = onSnapshot(q, (snapshot) => {
-      setPendingQuestions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (error) => handleFirestoreError(error, 'fetch_pending_questions', 'questions'));
+      const allQ = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as QuestionLike));
+      setAllQuestions(allQ);
+      setPendingQuestions(allQ.filter(q => q.approvalStatus === 'pending'));
+    }, (error) => handleFirestoreError(error, 'fetch_all_questions', 'questions'));
     return () => unsub();
   }, []);
 
@@ -2779,9 +2957,14 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
         payload.points = newQuestionMaxPoints || 10;
       }
 
-      await addDoc(collection(db, 'questions'), payload);
+      const docRef = await addDoc(collection(db, 'questions'), payload);
       logger.admin('Question Created', 'success', { type: newQuestionType, competencyId: newQuestionCompetencyId });
       toast.success('Question submitted for approval.');
+      
+      if (showAssessmentModal) {
+        setAssessmentSelectedQuestions(prev => [...prev, docRef.id]);
+        toast.success('Question automatically added to assessment.');
+      }
 
       setNewQuestionText('');
       setNewQuestionOptions(['', '', '', '']);
@@ -2818,7 +3001,7 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
           { id: 'departments', label: 'Departments', icon: <Building2 className="w-4 h-4" /> },
           { id: 'competencies', label: 'Competencies', icon: <BookOpen className="w-4 h-4" /> },
           { id: 'assessments', label: 'Assessments', icon: <ClipboardList className="w-4 h-4" /> },
-          { id: 'approvals', label: 'Approvals', icon: <CheckCircle2 className="w-4 h-4" />, count: pendingQuestions.length },
+          { id: 'approvals', label: 'Question Bank', icon: <Database className="w-4 h-4" />, count: pendingQuestions.length },
           ...(user.role === 'core_team' ? [{ id: 'logs', label: 'Audit Logs', icon: <History className="w-4 h-4" /> }] : []),
         ].map(tab => (
           <button
@@ -2846,7 +3029,7 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
                 <Building2 className="w-5 h-5 text-[#F27D26]" />
                 Department Management
               </h3>
-              <Button className="text-xs"><Plus className="w-4 h-4" /> Add Dept</Button>
+              <Button className="text-xs" onClick={() => setShowDeptModal(true)}><Plus className="w-4 h-4" /> Add Dept</Button>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {departments.map(d => (
@@ -2856,7 +3039,21 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
                     <p className="text-[10px] text-gray-500 font-mono">ID: {d.id}</p>
                   </div>
                   <div className="flex gap-2">
-                    <Button variant="ghost" className="p-2 h-auto"><Settings className="w-4 h-4" /></Button>
+                    <Button variant="ghost" className="p-2 h-auto" onClick={() => {
+                      const action = window.prompt("Type 'rename' to rename this department, or 'delete' to delete it:");
+                      if (action === 'rename') {
+                        const newName = window.prompt("Enter new name for " + d.name, d.name);
+                        if (newName && newName.trim()) {
+                          handleRenameDepartment(d.id, newName.trim());
+                        }
+                      } else if (action === 'delete') {
+                        if (window.confirm("Are you sure you want to delete this department?")) {
+                          handleDeleteDepartment(d.id);
+                        }
+                      }
+                    }}>
+                      <Settings className="w-4 h-4" />
+                    </Button>
                   </div>
                 </div>
               ))}
@@ -2871,7 +3068,7 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
                 <BookOpen className="w-5 h-5 text-[#F27D26]" />
                 Competency Framework
               </h3>
-              <Button className="text-xs"><Plus className="w-4 h-4" /> New Competency</Button>
+              <Button className="text-xs" onClick={() => { setNewCompDeptId(departments[0]?.id || ''); setShowCompModal(true); }}><Plus className="w-4 h-4" /> New Competency</Button>
             </div>
             <div className="space-y-2">
               {competencies.map(c => (
@@ -2899,190 +3096,7 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
                 <ClipboardList className="w-5 h-5 text-[#F27D26]" />
                 Assessment Scheduling
               </h3>
-              <Button className="text-xs"><Plus className="w-4 h-4" /> Create Assessment</Button>
-            </div>
-            <div className="mb-6 border border-gray-200 p-4 space-y-4 bg-white">
-              <p className="text-xs font-black uppercase tracking-wide">Add Question</p>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div>
-                  <label className="text-[10px] font-bold uppercase text-gray-500">Question Type</label>
-                  <select
-                    className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs"
-                    value={newQuestionType}
-                    onChange={(event) => setNewQuestionType(event.target.value as any)}
-                  >
-                    <option value="mcq">Multiple Choice</option>
-                    <option value="likert">Likert Scale (Human-Centric Skills)</option>
-                    <option value="scenario_mcq">Scenario-Based MCQ</option>
-                    <option value="ranking">Ranking</option>
-                    <option value="text_answer">Short Text Answer</option>
-                  </select>
-                </div>
-                <div className="md:col-span-2">
-                  <label className="text-[10px] font-bold uppercase text-gray-500">Competency</label>
-                  <select
-                    className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs"
-                    value={newQuestionCompetencyId}
-                    onChange={(event) => setNewQuestionCompetencyId(event.target.value)}
-                  >
-                    {competencies.map((competency) => (
-                      <option key={competency.id} value={competency.id}>{competency.name}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              {newQuestionType === 'scenario_mcq' && (
-                <div>
-                  <label className="text-[10px] font-bold uppercase text-gray-500">Scenario Text</label>
-                  <textarea
-                    className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs min-h-24"
-                    value={newQuestionScenario}
-                    onChange={(event) => setNewQuestionScenario(event.target.value)}
-                    placeholder="Enter the scenario paragraph"
-                  />
-                </div>
-              )}
-
-              <div>
-                <label className="text-[10px] font-bold uppercase text-gray-500">Question Text</label>
-                <textarea
-                  className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs min-h-24"
-                  value={newQuestionText}
-                  onChange={(event) => setNewQuestionText(event.target.value)}
-                  placeholder="Enter question text"
-                />
-              </div>
-
-              {newQuestionType === 'text_answer' && (
-                <>
-                  <div>
-                    <label className="text-[10px] font-bold uppercase text-gray-500">Grading Rubric (For AI)</label>
-                    <textarea
-                      className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs min-h-24"
-                      value={newQuestionRubric}
-                      onChange={(event) => setNewQuestionRubric(event.target.value)}
-                      placeholder="Describe what a perfect answer looks like, and what to deduct points for."
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] font-bold uppercase text-gray-500">Max Points</label>
-                    <input
-                      type="number"
-                      className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs"
-                      value={newQuestionMaxPoints}
-                      onChange={(event) => setNewQuestionMaxPoints(Number(event.target.value))}
-                    />
-                  </div>
-                </>
-              )}
-
-              {newQuestionType === 'ranking' && (
-                <>
-                  <div className="space-y-3">
-                    <p className="text-[10px] font-bold uppercase text-gray-500">Items to Rank</p>
-                    {newQuestionItems.map((item, index) => (
-                      <div key={index} className="flex gap-2">
-                        <input
-                          className="flex-1 border border-gray-300 px-3 py-2 text-xs"
-                          value={item}
-                          onChange={(e) => {
-                            const next = [...newQuestionItems];
-                            next[index] = e.target.value;
-                            setNewQuestionItems(next);
-                          }}
-                          placeholder={`Item ${index + 1}`}
-                        />
-                        <Button variant="ghost" className="p-2 text-red-500 border border-gray-300" onClick={() => setNewQuestionItems(newQuestionItems.filter((_, i) => i !== index))}>
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
-                      </div>
-                    ))}
-                    <Button variant="outline" className="text-xs w-full py-2" onClick={() => setNewQuestionItems([...newQuestionItems, 'New Item'])}>
-                      <Plus className="w-4 h-4 mr-2" /> Add Item
-                    </Button>
-                  </div>
-                  <div>
-                    <label className="text-[10px] font-bold uppercase text-gray-500">Correct Order Indices (comma separated, e.g. 0,2,1,3)</label>
-                    <input
-                      type="text"
-                      className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs"
-                      value={newQuestionCorrectOrder}
-                      onChange={(event) => setNewQuestionCorrectOrder(event.target.value)}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] font-bold uppercase text-gray-500">Max Points</label>
-                    <input
-                      type="number"
-                      className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs"
-                      value={newQuestionMaxPoints}
-                      onChange={(event) => setNewQuestionMaxPoints(Number(event.target.value))}
-                    />
-                  </div>
-                </>
-              )}
-
-              {newQuestionType === 'likert' ? (
-                <div className="flex items-center gap-3 border border-gray-200 p-3">
-                  <input
-                    id="reverse-toggle"
-                    type="checkbox"
-                    checked={newQuestionReverse}
-                    onChange={(event) => setNewQuestionReverse(event.target.checked)}
-                  />
-                  <label htmlFor="reverse-toggle" className="text-xs font-bold uppercase">Is this a reverse-scored item?</label>
-                </div>
-              ) : (newQuestionType === 'mcq' || newQuestionType === 'scenario_mcq') && (
-                <div className="space-y-3">
-                  <p className="text-[10px] font-bold uppercase text-gray-500">Options</p>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                    {newQuestionOptions.map((option, index) => (
-                      <input
-                        key={index}
-                        className="border border-gray-300 px-3 py-2 text-xs"
-                        value={option}
-                        onChange={(event) => {
-                          const next = [...newQuestionOptions];
-                          next[index] = event.target.value;
-                          setNewQuestionOptions(next);
-                        }}
-                        placeholder={`Option ${String.fromCharCode(65 + index)}`}
-                      />
-                    ))}
-                  </div>
-                  <div>
-                    <label className="text-[10px] font-bold uppercase text-gray-500">Correct Option</label>
-                    <select
-                      className="mt-1 border border-gray-300 px-3 py-2 text-xs"
-                      value={newQuestionCorrectOption}
-                      onChange={(event) => setNewQuestionCorrectOption(Number(event.target.value))}
-                    >
-                      {newQuestionOptions.map((_, index) => (
-                        <option key={index} value={index}>{String.fromCharCode(65 + index)}</option>
-                      ))}
-                    </select>
-                  </div>
-                  {newQuestionType === 'scenario_mcq' && (
-                    <div className="mt-2">
-                      <label className="text-[10px] font-bold uppercase text-gray-500">Max Points</label>
-                      <input
-                        type="number"
-                        className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs"
-                        value={newQuestionMaxPoints}
-                        onChange={(event) => setNewQuestionMaxPoints(Number(event.target.value))}
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="flex justify-end">
-                <Button className="text-xs" disabled={savingQuestion} onClick={handleCreateQuestion}>
-                  {savingQuestion ? 'Saving...' : 'Create Question'}
-                </Button>
-              </div>
+              <Button className="text-xs" onClick={openCreateAssessment}><Plus className="w-4 h-4" /> Create Assessment</Button>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {assessments.map(a => (
@@ -3097,8 +3111,8 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
                     <p className="text-[10px] text-gray-500 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> Min Score: {a.minScore}%</p>
                   </div>
                   <div className="flex gap-2">
-                    <Button variant="outline" className="flex-1 text-[10px] h-8">Edit</Button>
-                    <Button variant="outline" className="flex-1 text-[10px] h-8">Questions</Button>
+                    <Button variant="outline" className="flex-1 text-[10px] h-8" onClick={() => openEditAssessment(a)}>Edit</Button>
+                    <Button variant="outline" className="flex-1 text-[10px] h-8" onClick={() => viewQuestions(a)}>Questions</Button>
                   </div>
                 </div>
               ))}
@@ -3106,48 +3120,105 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
           </Card>
         )}
 
-        {activeTab === 'approvals' && (
-          <Card>
-            <h3 className="text-lg lg:text-xl font-bold uppercase mb-6 flex items-center gap-2">
-              <CheckCircle2 className="w-5 h-5 text-[#F27D26]" />
-              Question Approval Workflow
-            </h3>
-            {pendingQuestions.length === 0 ? (
-              <div className="text-center py-12 text-gray-500 italic text-sm">No questions pending approval.</div>
-            ) : (
-              <div className="space-y-4">
-                {pendingQuestions.map(q => (
-                  <div key={q.id} className="p-4 border border-gray-100 space-y-4">
-                    <div className="flex justify-between items-start">
-                      <Badge variant="warning">Pending Review</Badge>
-                      <span className="text-[10px] font-mono text-gray-400">ID: {q.id}</span>
-                    </div>
-                    <p className="font-bold text-sm">{getQuestionText(q)}</p>
-                    {q.type === 'likert' ? (
-                      <div className="border border-gray-200 p-3 bg-gray-50 space-y-2">
-                        <p className="text-[10px] font-bold uppercase">Likert Question</p>
-                        <p className="text-xs text-gray-600">Scale: 1 Strongly Disagree to 5 Strongly Agree</p>
-                        <p className="text-xs text-gray-600">Reverse Scored: {(q.is_reverse || q.isReverse) ? 'Yes' : 'No'}</p>
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-2 gap-2">
-                        {(q.options || []).map((opt: string, i: number) => (
-                          <div key={i} className={cn("text-xs p-2 border", i === q.correctOption ? "border-green-500 bg-green-50" : "border-gray-100")}>
-                            {String.fromCharCode(65 + i)}. {opt}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <div className="flex justify-end gap-2 pt-2 border-t border-gray-50">
-                      <Button variant="ghost" className="text-red-500 text-xs" onClick={() => handleRejectQuestion(q.id)}>Reject</Button>
-                      <Button variant="primary" className="text-xs" onClick={() => handleApproveQuestion(q.id)}>Approve</Button>
-                    </div>
+        {activeTab === 'question_bank' && (() => {
+          const filteredQuestions = allQuestions.filter(q => {
+            if (questionFilterStatus !== 'all' && q.approvalStatus !== questionFilterStatus) return false;
+            if (questionFilterType !== 'all' && (q.type || 'mcq') !== questionFilterType) return false;
+            if (questionFilterCompetency !== 'all' && getQuestionCompetencyId(q) !== questionFilterCompetency) return false;
+            if (questionSearchQuery) {
+              const text = getQuestionText(q).toLowerCase();
+              if (!text.includes(questionSearchQuery.toLowerCase())) return false;
+            }
+            return true;
+          });
+
+          return (
+            <Card>
+              <h3 className="text-lg lg:text-xl font-bold uppercase mb-6 flex items-center gap-2">
+                <Database className="w-5 h-5 text-[#F27D26]" />
+                Question Bank
+              </h3>
+              
+              <div className="flex flex-col md:flex-row gap-4 mb-6">
+                <div className="flex-1">
+                  <div className="relative">
+                    <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                    <input 
+                      type="text" 
+                      placeholder="Search questions..." 
+                      className="w-full pl-9 pr-3 py-2 border border-gray-300 text-sm"
+                      value={questionSearchQuery}
+                      onChange={(e) => setQuestionSearchQuery(e.target.value)}
+                    />
                   </div>
-                ))}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <select className="border border-gray-300 px-3 py-2 text-sm max-w-[140px]" value={questionFilterStatus} onChange={(e) => setQuestionFilterStatus(e.target.value)}>
+                    <option value="all">All Statuses</option>
+                    <option value="approved">Approved</option>
+                    <option value="pending">Pending</option>
+                    <option value="rejected">Rejected</option>
+                  </select>
+                  <select className="border border-gray-300 px-3 py-2 text-sm max-w-[120px]" value={questionFilterType} onChange={(e) => setQuestionFilterType(e.target.value)}>
+                    <option value="all">All Types</option>
+                    <option value="mcq">MCQ</option>
+                    <option value="likert">Likert</option>
+                    <option value="scenario_mcq">Scenario MCQ</option>
+                    <option value="ranking">Ranking</option>
+                  </select>
+                  <select className="border border-gray-300 px-3 py-2 text-sm max-w-[160px]" value={questionFilterCompetency} onChange={(e) => setQuestionFilterCompetency(e.target.value)}>
+                    <option value="all">All Competencies</option>
+                    {competencies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </div>
               </div>
-            )}
-          </Card>
-        )}
+
+              {filteredQuestions.length === 0 ? (
+                <div className="text-center py-12 text-gray-500 italic text-sm">No questions found matching your criteria.</div>
+              ) : (
+                <div className="space-y-4">
+                  {filteredQuestions.map(q => (
+                    <div key={q.id} className="p-4 border border-gray-100 space-y-4">
+                      <div className="flex justify-between items-start">
+                        <Badge variant={q.approvalStatus === 'approved' ? 'success' : q.approvalStatus === 'rejected' ? 'danger' : 'warning'}>
+                          {q.approvalStatus === 'approved' ? 'Approved' : q.approvalStatus === 'rejected' ? 'Rejected' : 'Pending Review'}
+                        </Badge>
+                        <span className="text-[10px] font-mono text-gray-400">ID: {q.id}</span>
+                      </div>
+                      <p className="font-bold text-sm">{getQuestionText(q)}</p>
+                      
+                      <div className="text-[10px] uppercase text-gray-500 font-bold mb-2">
+                        Competency: {competencies.find(c => c.id === getQuestionCompetencyId(q))?.name || getQuestionCompetencyId(q)}
+                      </div>
+
+                      {q.type === 'likert' ? (
+                        <div className="border border-gray-200 p-3 bg-gray-50 space-y-2">
+                          <p className="text-[10px] font-bold uppercase">Likert Question</p>
+                          <p className="text-xs text-gray-600">Reverse Scored: {(q.is_reverse || q.isReverse) ? 'Yes' : 'No'}</p>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-2 gap-2">
+                          {(q.options || []).map((opt: string, i: number) => (
+                            <div key={i} className={cn("text-xs p-2 border", i === q.correctOption ? "border-green-500 bg-green-50" : "border-gray-100")}>
+                              {String.fromCharCode(65 + i)}. {opt}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      
+                      {q.approvalStatus === 'pending' && (
+                        <div className="flex justify-end gap-2 pt-2 border-t border-gray-50 mt-4">
+                          <Button variant="ghost" className="text-red-500 text-xs" onClick={() => handleRejectQuestion(q.id)}>Reject</Button>
+                          <Button variant="primary" className="text-xs" onClick={() => handleApproveQuestion(q.id)}>Approve</Button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          );
+        })()}
 
         {activeTab === 'logs' && (
           <Card>
@@ -3179,6 +3250,276 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
           </Card>
         )}
       </div>
+      {/* Modals */}
+      {showDeptModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-md bg-white">
+            <h3 className="text-xl font-bold uppercase mb-4">Add Department</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="text-[10px] font-bold uppercase text-gray-500">Department Name</label>
+                <input className="w-full border border-gray-300 px-3 py-2 text-sm mt-1" value={newDeptName} onChange={(e) => setNewDeptName(e.target.value)} placeholder="e.g. Computer Science" />
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" className="flex-1" onClick={() => setShowDeptModal(false)}>Cancel</Button>
+                <Button className="flex-1" onClick={handleAddDepartment}>Save</Button>
+              </div>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {showCompModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-md bg-white">
+            <h3 className="text-xl font-bold uppercase mb-4">Add Competency</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="text-[10px] font-bold uppercase text-gray-500">Competency Name</label>
+                <input className="w-full border border-gray-300 px-3 py-2 text-sm mt-1" value={newCompName} onChange={(e) => setNewCompName(e.target.value)} placeholder="e.g. Analytical Thinking" />
+              </div>
+              <div>
+                <label className="text-[10px] font-bold uppercase text-gray-500">Department</label>
+                <select className="w-full border border-gray-300 px-3 py-2 text-sm mt-1" value={newCompDeptId} onChange={(e) => setNewCompDeptId(e.target.value)}>
+                  <option value="">Common (All Departments)</option>
+                  {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </select>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" className="flex-1" onClick={() => setShowCompModal(false)}>Cancel</Button>
+                <Button className="flex-1" onClick={handleAddCompetency}>Save</Button>
+              </div>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {showAssessmentModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-4xl bg-white max-h-[90vh] overflow-y-auto custom-scrollbar flex flex-col">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-bold uppercase">{editingAssessment ? 'Edit Assessment' : 'Create Assessment'}</h3>
+              <div className="flex gap-2">
+                <Button variant={assessmentModalTab === 'settings' ? 'primary' : 'outline'} className="text-xs py-1" onClick={() => setAssessmentModalTab('settings')}>Settings</Button>
+                <Button variant={assessmentModalTab === 'questions' ? 'primary' : 'outline'} className="text-xs py-1" onClick={() => setAssessmentModalTab('questions')}>Questions ({assessmentSelectedQuestions.length})</Button>
+              </div>
+            </div>
+
+            {assessmentModalTab === 'settings' && (
+              <div className="space-y-4">
+                <div>
+                  <label className="text-[10px] font-bold uppercase text-gray-500">Assessment Name</label>
+                  <input className="w-full border border-gray-300 px-3 py-2 text-sm mt-1" value={assessmentForm.name} onChange={(e) => setAssessmentForm({...assessmentForm, name: e.target.value})} />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] font-bold uppercase text-gray-500">Time Limit (mins)</label>
+                    <input type="number" className="w-full border border-gray-300 px-3 py-2 text-sm mt-1" value={assessmentForm.timeLimit} onChange={(e) => setAssessmentForm({...assessmentForm, timeLimit: Number(e.target.value)})} />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold uppercase text-gray-500">Min Score (%)</label>
+                    <input type="number" className="w-full border border-gray-300 px-3 py-2 text-sm mt-1" value={assessmentForm.minScore} onChange={(e) => setAssessmentForm({...assessmentForm, minScore: Number(e.target.value)})} />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold uppercase text-gray-500">Department</label>
+                  <select className="w-full border border-gray-300 px-3 py-2 text-sm mt-1" value={assessmentForm.departmentId} onChange={(e) => setAssessmentForm({...assessmentForm, departmentId: e.target.value})}>
+                    <option value="common">Common (All Departments)</option>
+                    {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                  </select>
+                </div>
+                <div className="flex items-center gap-2 mt-2">
+                  <input type="checkbox" id="assessment-active" checked={assessmentForm.active} onChange={(e) => setAssessmentForm({...assessmentForm, active: e.target.checked})} />
+                  <label htmlFor="assessment-active" className="text-sm font-bold uppercase cursor-pointer">Active (Visible to Students)</label>
+                </div>
+                
+                <div>
+                  <label className="text-[10px] font-bold uppercase text-gray-500 mb-2 block">Competency Distribution (Fallback if explicit questions not selected)</label>
+                  <div className="space-y-2 border border-gray-200 p-3 max-h-48 overflow-y-auto custom-scrollbar">
+                    {competencies.map(c => (
+                      <div key={c.id} className="flex items-center justify-between">
+                        <span className="text-xs">{c.name}</span>
+                        <input type="number" min="0" className="w-16 border border-gray-300 px-2 py-1 text-xs" 
+                          value={assessmentForm.competencyDistribution[c.id] || 0}
+                          onChange={(e) => setAssessmentForm({
+                            ...assessmentForm, 
+                            competencyDistribution: {
+                              ...assessmentForm.competencyDistribution, 
+                              [c.id]: Number(e.target.value)
+                            }
+                          })} 
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex gap-2 mt-6">
+                  <Button variant="outline" className="flex-1" onClick={() => setShowAssessmentModal(false)}>Cancel</Button>
+                  <Button className="flex-1" onClick={handleSaveAssessment}>Save Assessment</Button>
+                </div>
+              </div>
+            )}
+
+            {assessmentModalTab === 'questions' && (
+              <div className="flex flex-col space-y-4 flex-1">
+                <div className="flex justify-between items-center bg-gray-50 p-2 border border-gray-200">
+                  <p className="text-xs font-bold uppercase">Selected Questions</p>
+                  <Button className="text-xs py-1 h-auto" onClick={() => setShowQuestionSelector(true)}><Plus className="w-3 h-3 mr-1"/> Add Questions</Button>
+                </div>
+
+                <div className="space-y-2 max-h-64 overflow-y-auto custom-scrollbar border border-gray-100 p-2">
+                  {assessmentSelectedQuestions.length === 0 ? (
+                    <p className="text-xs text-gray-500 text-center py-4">No questions explicitly selected. Assessment will randomly generate from assigned competencies if none selected.</p>
+                  ) : (
+                    assessmentSelectedQuestions.map(qId => {
+                      const q = allQuestions.find(aq => aq.id === qId);
+                      if (!q) return null;
+                      return (
+                        <div key={q.id} className="flex justify-between items-center p-2 border border-gray-100 text-sm">
+                          <div>
+                            <p className="font-bold">{getQuestionText(q)}</p>
+                            <p className="text-[10px] text-gray-500 font-mono">Competency: {competencies.find(c => c.id === getQuestionCompetencyId(q))?.name || getQuestionCompetencyId(q)}</p>
+                          </div>
+                          <Button variant="ghost" className="text-red-500 p-1 h-auto" onClick={() => setAssessmentSelectedQuestions(assessmentSelectedQuestions.filter(id => id !== q.id))}>
+                            <X className="w-4 h-4"/>
+                          </Button>
+                        </div>
+                      )
+                    })
+                  )}
+                </div>
+
+                {/* Add new question directly from here */}
+                <div className="mt-4 border border-[#141414] p-4 bg-gray-50">
+                  <p className="text-xs font-black uppercase tracking-wide mb-4">Create New Question for Bank</p>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-[10px] font-bold uppercase text-gray-500">Question Type</label>
+                      <select
+                        className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs"
+                        value={newQuestionType}
+                        onChange={(event) => setNewQuestionType(event.target.value as any)}
+                      >
+                        <option value="mcq">Multiple Choice</option>
+                        <option value="likert">Likert Scale</option>
+                        <option value="scenario_mcq">Scenario-Based MCQ</option>
+                        <option value="ranking">Ranking</option>
+                        <option value="text_answer">Short Text Answer</option>
+                      </select>
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="text-[10px] font-bold uppercase text-gray-500">Competency</label>
+                      <select
+                        className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs"
+                        value={newQuestionCompetencyId}
+                        onChange={(event) => setNewQuestionCompetencyId(event.target.value)}
+                      >
+                        {competencies.map((competency) => (
+                          <option key={competency.id} value={competency.id}>{competency.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold uppercase text-gray-500 mt-3 block">Question Text</label>
+                    <textarea
+                      className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs min-h-16"
+                      value={newQuestionText}
+                      onChange={(event) => setNewQuestionText(event.target.value)}
+                      placeholder="Enter question text"
+                    />
+                  </div>
+                  <div className="mt-4 flex justify-end">
+                    <Button className="text-xs" disabled={savingQuestion} onClick={handleCreateQuestion}>
+                      {savingQuestion ? 'Saving...' : 'Save to Bank'}
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="flex gap-2 mt-4 pt-4 border-t border-gray-200">
+                  <Button variant="outline" className="flex-1" onClick={() => setShowAssessmentModal(false)}>Cancel</Button>
+                  <Button className="flex-1" onClick={handleSaveAssessment}>Save Assessment</Button>
+                </div>
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {showQuestionSelector && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+          <Card className="w-full max-w-3xl bg-white max-h-[80vh] flex flex-col">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-bold uppercase">Select Questions from Bank</h3>
+              <Button variant="ghost" className="p-1 h-auto" onClick={() => setShowQuestionSelector(false)}><X className="w-4 h-4"/></Button>
+            </div>
+            <div className="relative mb-4">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input 
+                type="text" 
+                placeholder="Search approved questions..." 
+                className="w-full pl-9 pr-3 py-2 border border-gray-300 text-sm"
+                value={questionSearchQuery}
+                onChange={(e) => setQuestionSearchQuery(e.target.value)}
+              />
+            </div>
+            <div className="flex-1 overflow-y-auto space-y-2 custom-scrollbar pr-2">
+              {allQuestions.filter(q => q.approvalStatus === 'approved').filter(q => {
+                if (questionSearchQuery && !getQuestionText(q).toLowerCase().includes(questionSearchQuery.toLowerCase())) return false;
+                return true;
+              }).map(q => {
+                const isSelected = assessmentSelectedQuestions.includes(q.id);
+                return (
+                  <div key={q.id} className={cn("p-3 border flex justify-between items-center cursor-pointer transition-colors", isSelected ? "border-[#F27D26] bg-orange-50" : "border-gray-200 hover:border-gray-400")} onClick={() => {
+                    if (isSelected) {
+                      setAssessmentSelectedQuestions(assessmentSelectedQuestions.filter(id => id !== q.id));
+                    } else {
+                      setAssessmentSelectedQuestions([...assessmentSelectedQuestions, q.id]);
+                    }
+                  }}>
+                    <div className="pr-4">
+                      <p className="text-sm font-bold">{getQuestionText(q)}</p>
+                      <p className="text-[10px] text-gray-500 font-mono mt-1">Competency: {competencies.find(c => c.id === getQuestionCompetencyId(q))?.name || getQuestionCompetencyId(q)}</p>
+                    </div>
+                    {isSelected ? <CheckCircle2 className="w-5 h-5 text-[#F27D26] shrink-0" /> : <div className="w-5 h-5 border border-gray-300 rounded-full shrink-0" />}
+                  </div>
+                )
+              })}
+              {allQuestions.filter(q => q.approvalStatus === 'approved').length === 0 && (
+                 <p className="text-sm text-gray-500 italic text-center py-4">No approved questions available.</p>
+              )}
+            </div>
+            <div className="mt-4 pt-4 border-t border-gray-100 flex justify-end">
+              <Button onClick={() => setShowQuestionSelector(false)}>Done</Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {showQuestionsModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-2xl bg-white max-h-[90vh] flex flex-col">
+            <h3 className="text-xl font-bold uppercase mb-2">Assessment Question Pool</h3>
+            <p className="text-xs text-gray-500 mb-4">{showQuestionsModal.name}</p>
+            <div className="flex-1 overflow-y-auto space-y-3 pr-2 custom-scrollbar">
+              {assessmentQuestions.length === 0 ? (
+                <p className="text-sm text-gray-500 italic">No approved questions found for the required competencies.</p>
+              ) : (
+                assessmentQuestions.map((q, i) => (
+                  <div key={q.id} className="p-3 border border-gray-100 text-sm">
+                    <p className="font-bold mb-1">{i+1}. {q.text || q.question_text}</p>
+                    <p className="text-[10px] text-gray-500 font-mono">Competency: {competencies.find(c => c.id === getQuestionCompetencyId(q))?.name || getQuestionCompetencyId(q)}</p>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="pt-4 mt-4 border-t border-gray-100 text-right">
+              <Button onClick={() => setShowQuestionsModal(null)}>Close</Button>
+            </div>
+          </Card>
+        </div>
+      )}
     </div>
   );
 }
