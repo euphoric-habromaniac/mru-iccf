@@ -2746,20 +2746,33 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
       
       for (const assessment of assessments) {
         if (!assessment.questionIds || assessment.questionIds.length === 0) {
-          const distribution = assessment.competencyDistribution || {};
           let selectedIds: string[] = [];
           
-          for (const [compId, count] of Object.entries(distribution)) {
-            if (count > 0) {
-              const eligible = allQuestions.filter(q => q.approvalStatus === 'approved' && getQuestionCompetencyId(q) === compId);
-              const shuffled = [...eligible].sort(() => 0.5 - Math.random());
-              const picked = shuffled.slice(0, count).map(q => q.id);
-              selectedIds = [...selectedIds, ...picked];
+          if (assessment.questions && assessment.questions.length > 0) {
+            selectedIds = assessment.questions.map((q: any) => q.id);
+            // Ensure these old questions exist in the global bank
+            for (const q of assessment.questions) {
+              if (!allQuestions.find(aq => aq.id === q.id)) {
+                batch.set(doc(db, 'questions', q.id), { ...q, approvalStatus: 'approved' });
+              }
+            }
+          } else {
+            const distribution = assessment.competencyDistribution || {};
+            for (const [compId, count] of Object.entries(distribution)) {
+              if (count > 0) {
+                const eligible = allQuestions.filter(q => q.approvalStatus === 'approved' && getQuestionCompetencyId(q) === compId);
+                const shuffled = [...eligible].sort(() => 0.5 - Math.random());
+                const picked = shuffled.slice(0, count).map(q => q.id);
+                selectedIds = [...selectedIds, ...picked];
+              }
             }
           }
           
           if (selectedIds.length > 0) {
-            batch.update(doc(db, 'assessments', assessment.id), { questionIds: selectedIds });
+            batch.update(doc(db, 'assessments', assessment.id), { 
+              questionIds: selectedIds,
+              questions: [] // Clean up legacy data
+            });
             migratedCount++;
           }
         }
@@ -2767,7 +2780,7 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
       
       if (migratedCount > 0) {
         await batch.commit();
-        toast.success(`Migrated ${migratedCount} assessments with explicit question IDs.`);
+        toast.success(`Migrated ${migratedCount} assessments to use explicit Question Bank IDs.`);
       } else {
         toast.info('No assessments required migration.');
       }
@@ -2899,14 +2912,18 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
 
   const viewQuestions = async (a: Assessment) => {
     setShowQuestionsModal(a);
-    try {
-      const q = query(collection(db, 'questions'), where('approvalStatus', '==', 'approved'));
-      const snapshot = await getDocs(q);
-      const allApproved = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as QuestionLike[];
-      const relevant = allApproved.filter(q => Object.keys(a.competencyDistribution).includes(getQuestionCompetencyId(q)));
-      setAssessmentQuestions(relevant);
-    } catch (e: any) {
-      handleFirestoreError(e, 'fetch_assessment_questions', 'questions');
+    if (a.questionIds && a.questionIds.length > 0) {
+      setAssessmentQuestions(allQuestions.filter(q => a.questionIds!.includes(q.id)));
+    } else {
+      try {
+        const q = query(collection(db, 'questions'), where('approvalStatus', '==', 'approved'));
+        const snapshot = await getDocs(q);
+        const allApproved = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as QuestionLike[];
+        const relevant = allApproved.filter(q => Object.keys(a.competencyDistribution).includes(getQuestionCompetencyId(q)));
+        setAssessmentQuestions(relevant);
+      } catch (e: any) {
+        handleFirestoreError(e, 'fetch_assessment_questions', 'questions');
+      }
     }
   };
 
