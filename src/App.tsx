@@ -2714,6 +2714,68 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
   const [showQuestionsModal, setShowQuestionsModal] = useState<Assessment | null>(null);
   const [assessmentQuestions, setAssessmentQuestions] = useState<QuestionLike[]>([]);
 
+  // Edit Question State
+  const [editingQuestionId, setEditingQuestionId] = useState<string | null>(null);
+  const [editQuestionData, setEditQuestionData] = useState<Partial<QuestionLike>>({});
+  const [savingEditQuestion, setSavingEditQuestion] = useState(false);
+
+  const openEditQuestion = (q: QuestionLike) => {
+    setEditingQuestionId(q.id);
+    setEditQuestionData({ ...q });
+  };
+
+  const handleSaveEditQuestion = async () => {
+    if (!editingQuestionId) return;
+    setSavingEditQuestion(true);
+    try {
+      const { updateDoc } = await import('firebase/firestore');
+      await updateDoc(doc(db, 'questions', editingQuestionId), editQuestionData);
+      toast.success('Question updated successfully.');
+      setEditingQuestionId(null);
+    } catch (e: any) {
+      handleFirestoreError(e, 'update_question', 'questions');
+    } finally {
+      setSavingEditQuestion(false);
+    }
+  };
+
+  const handleMigrateAssessments = async () => {
+    try {
+      const batch = writeBatch(db);
+      let migratedCount = 0;
+      
+      for (const assessment of assessments) {
+        if (!assessment.questionIds || assessment.questionIds.length === 0) {
+          const distribution = assessment.competencyDistribution || {};
+          let selectedIds: string[] = [];
+          
+          for (const [compId, count] of Object.entries(distribution)) {
+            if (count > 0) {
+              const eligible = allQuestions.filter(q => q.approvalStatus === 'approved' && getQuestionCompetencyId(q) === compId);
+              const shuffled = [...eligible].sort(() => 0.5 - Math.random());
+              const picked = shuffled.slice(0, count).map(q => q.id);
+              selectedIds = [...selectedIds, ...picked];
+            }
+          }
+          
+          if (selectedIds.length > 0) {
+            batch.update(doc(db, 'assessments', assessment.id), { questionIds: selectedIds });
+            migratedCount++;
+          }
+        }
+      }
+      
+      if (migratedCount > 0) {
+        await batch.commit();
+        toast.success(`Migrated ${migratedCount} assessments with explicit question IDs.`);
+      } else {
+        toast.info('No assessments required migration.');
+      }
+    } catch (error: any) {
+      handleFirestoreError(error, 'migrate_assessments', 'assessments');
+    }
+  };
+
   const handleAddDepartment = async () => {
     if (!newDeptName.trim()) return;
     const id = newDeptName.trim().toLowerCase().replace(/[^a-z0-9]/g, '-');
@@ -3096,7 +3158,10 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
                 <ClipboardList className="w-5 h-5 text-[#F27D26]" />
                 Assessment Scheduling
               </h3>
-              <Button className="text-xs" onClick={openCreateAssessment}><Plus className="w-4 h-4" /> Create Assessment</Button>
+              <div className="flex gap-2">
+                <Button variant="outline" className="text-xs" onClick={handleMigrateAssessments}>Migrate Legacy</Button>
+                <Button className="text-xs" onClick={openCreateAssessment}><Plus className="w-4 h-4 mr-1" /> Create Assessment</Button>
+              </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {assessments.map(a => (
@@ -3206,12 +3271,15 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
                         </div>
                       )}
                       
-                      {q.approvalStatus === 'pending' && (
-                        <div className="flex justify-end gap-2 pt-2 border-t border-gray-50 mt-4">
-                          <Button variant="ghost" className="text-red-500 text-xs" onClick={() => handleRejectQuestion(q.id)}>Reject</Button>
-                          <Button variant="primary" className="text-xs" onClick={() => handleApproveQuestion(q.id)}>Approve</Button>
-                        </div>
-                      )}
+                      <div className="flex justify-end gap-2 pt-2 border-t border-gray-50 mt-4">
+                        <Button variant="outline" className="text-xs" onClick={() => openEditQuestion(q)}>Edit</Button>
+                        {q.approvalStatus === 'pending' && (
+                          <>
+                            <Button variant="ghost" className="text-red-500 text-xs" onClick={() => handleRejectQuestion(q.id)}>Reject</Button>
+                            <Button variant="primary" className="text-xs" onClick={() => handleApproveQuestion(q.id)}>Approve</Button>
+                          </>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -3516,6 +3584,74 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
             </div>
             <div className="pt-4 mt-4 border-t border-gray-100 text-right">
               <Button onClick={() => setShowQuestionsModal(null)}>Close</Button>
+            </div>
+          </Card>
+        </div>
+      )}
+      {editingQuestionId && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+          <Card className="w-full max-w-3xl bg-white max-h-[90vh] overflow-y-auto custom-scrollbar flex flex-col">
+            <h3 className="text-xl font-bold uppercase mb-4">Edit Question</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="text-[10px] font-bold uppercase text-gray-500">Question Text</label>
+                <textarea
+                  className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs min-h-16"
+                  value={editQuestionData.text || editQuestionData.question_text || ''}
+                  onChange={(e) => setEditQuestionData({ ...editQuestionData, text: e.target.value, question_text: e.target.value })}
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] font-bold uppercase text-gray-500">Competency</label>
+                  <select
+                    className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs"
+                    value={editQuestionData.competencyId || editQuestionData.competency_id || ''}
+                    onChange={(e) => setEditQuestionData({ ...editQuestionData, competencyId: e.target.value, competency_id: e.target.value })}
+                  >
+                    {competencies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold uppercase text-gray-500">Points</label>
+                  <input type="number" className="mt-1 w-full border border-gray-300 px-3 py-2 text-xs" 
+                    value={editQuestionData.points || editQuestionData.max_points || 1}
+                    onChange={(e) => setEditQuestionData({ ...editQuestionData, points: Number(e.target.value), max_points: Number(e.target.value) })}
+                  />
+                </div>
+              </div>
+              
+              {(editQuestionData.type === 'mcq' || editQuestionData.type === 'scenario_mcq') && (
+                <div className="space-y-3">
+                  <p className="text-[10px] font-bold uppercase text-gray-500">Options</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {(editQuestionData.options || []).map((opt, i) => (
+                      <input key={i} className="border border-gray-300 px-3 py-2 text-xs"
+                        value={opt}
+                        onChange={(e) => {
+                          const next = [...(editQuestionData.options || [])];
+                          next[i] = e.target.value;
+                          setEditQuestionData({ ...editQuestionData, options: next });
+                        }}
+                      />
+                    ))}
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold uppercase text-gray-500">Correct Option</label>
+                    <select className="mt-1 border border-gray-300 px-3 py-2 text-xs"
+                      value={editQuestionData.correctOption || 0}
+                      onChange={(e) => setEditQuestionData({ ...editQuestionData, correctOption: Number(e.target.value) })}
+                    >
+                      {(editQuestionData.options || []).map((_, i) => <option key={i} value={i}>{String.fromCharCode(65 + i)}</option>)}
+                    </select>
+                  </div>
+                </div>
+              )}
+              
+              <div className="flex gap-2 justify-end mt-4">
+                <Button variant="outline" onClick={() => setEditingQuestionId(null)}>Cancel</Button>
+                <Button onClick={handleSaveEditQuestion} disabled={savingEditQuestion}>{savingEditQuestion ? 'Saving...' : 'Save Changes'}</Button>
+              </div>
             </div>
           </Card>
         </div>
