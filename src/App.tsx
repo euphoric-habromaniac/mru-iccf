@@ -2750,11 +2750,10 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
       for (const assessment of assessments) {
         if (!assessment.questionIds || assessment.questionIds.length === 0) {
           let selectedIds: string[] = [];
-          
-          if (assessment.questions && assessment.questions.length > 0) {
-            selectedIds = assessment.questions.map((q: any) => q.id);
+          if ((assessment as any).questions && (assessment as any).questions.length > 0) {
+            selectedIds = (assessment as any).questions.map((q: any) => q.id);
             // Ensure these old questions exist in the global bank
-            for (const q of assessment.questions) {
+            for (const q of (assessment as any).questions) {
               if (!allQuestions.find(aq => aq.id === q.id)) {
                 batch.set(doc(db, 'questions', q.id), { ...q, approvalStatus: 'approved' });
               }
