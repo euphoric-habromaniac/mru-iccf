@@ -15,6 +15,25 @@ import { gradeTextAnswer } from './lib/aiService';
 
 import { logger } from './lib/logger';
 
+let timeOffset = 0;
+let isTimeSynced = false;
+
+export const syncRealTime = async () => {
+  if (isTimeSynced) return;
+  try {
+    const res = await fetch('https://worldtimeapi.org/api/timezone/Etc/UTC');
+    const data = await res.json();
+    const serverTime = new Date(data.utc_datetime).getTime();
+    timeOffset = serverTime - Date.now();
+    isTimeSynced = true;
+    console.log('Real time synchronized. Offset:', timeOffset);
+  } catch (e) {
+    console.error('Failed to sync real time:', e);
+  }
+};
+
+export const getRealTime = () => Date.now() + timeOffset;
+
 // --- Error Handling Helper ---
 const handleFirestoreError = (error: any, operation: string, path: string | null = null) => {
   const authInfo: any = {};
@@ -136,6 +155,10 @@ const Badge = ({ children, variant = 'default', className }: { children: React.R
 // --- Main App ---
 
 export default function App() {
+  useEffect(() => {
+    syncRealTime();
+  }, []);
+
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<'dashboard' | 'assessment' | 'history' | 'admin' | 'scorecard' | 'studentResults'>('dashboard');
@@ -796,6 +819,7 @@ function NavButton({ active, onClick, icon, label, collapsed }: { active: boolea
 // --- Dashboard Sub-components ---
 
 function StudentDashboard({ user, assessments, attempts: rawAttempts, competencies, departments, onStartAssessment }: { user: User; assessments: Assessment[]; attempts: Attempt[]; competencies: Competency[]; departments: any[]; onStartAssessment: (a: Assessment) => void }) {
+  const [showRadarModal, setShowRadarModal] = useState(false);
   const attempts = rawAttempts.filter(att => assessments.some(a => a.id === att.assessmentId));
   const latestAttempt = attempts.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
   const isCertified = attempts.some(a => a.certificationStatus === 'certified');
@@ -804,12 +828,13 @@ function StudentDashboard({ user, assessments, attempts: rawAttempts, competenci
     const attemptsForAss = attempts.filter(a => a.assessmentId === assessmentId);
     attemptsForAss.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
-    const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
-    const attemptsInLast3Hours = attemptsForAss.filter(a => new Date(a.timestamp) > threeHoursAgo);
+    const now = getRealTime();
+    const oneHourAgo = new Date(now - 1 * 60 * 60 * 1000);
+    const attemptsInLastHour = attemptsForAss.filter(a => new Date(a.timestamp) > oneHourAgo);
 
-    if (attemptsInLast3Hours.length >= 3) {
-      const latestAttemptTime = new Date(attemptsInLast3Hours[0].timestamp).getTime();
-      const cooldownEndsAt = latestAttemptTime + 3 * 60 * 60 * 1000;
+    if (attemptsInLastHour.length >= 3) {
+      const latestAttemptTime = new Date(attemptsInLastHour[0].timestamp).getTime();
+      const cooldownEndsAt = latestAttemptTime + 1 * 60 * 60 * 1000;
       return { eligible: false, reason: 'cooldown', cooldownEndsAt };
     }
     
@@ -854,6 +879,33 @@ function StudentDashboard({ user, assessments, attempts: rawAttempts, competenci
       score: Math.round(att.overallScore)
     }));
 
+  const allCompNamesSet = new Set<string>();
+  attempts.forEach(att => {
+    if (att.skillScores) {
+      Object.keys(att.skillScores).forEach(compId => {
+        const cName = competencies.find(c => c.id === compId)?.name || compId;
+        allCompNamesSet.add(cName);
+      });
+    }
+  });
+  const allCompNames = Array.from(allCompNamesSet);
+
+  const coefficientGrowthData = attempts
+    .slice()
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+    .map((att, idx) => {
+      const point: any = { date: `Att ${idx + 1}` };
+      if (att.skillScores) {
+        Object.entries(att.skillScores).forEach(([compId, score]) => {
+          const cName = competencies.find(c => c.id === compId)?.name || compId;
+          point[cName] = Math.round(getSkillPercentageValue(score));
+        });
+      }
+      return point;
+    });
+
+  const chartColors = ['#F27D26', '#3b82f6', '#10b981', '#f43f5e', '#8b5cf6', '#eab308', '#ec4899', '#06b6d4', '#14b8a6', '#6366f1'];
+
   const reportData = Object.entries(bestSkillScores)
     .map(([compId, scoreVal]) => ({
       compName: competencies.find(c => c.id === compId)?.name || compId,
@@ -878,7 +930,8 @@ function StudentDashboard({ user, assessments, attempts: rawAttempts, competenci
   };
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-8">
+    <>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-8">
       <div className="lg:col-span-2 space-y-6 lg:space-y-8">
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>
           <Card className="relative overflow-hidden">
@@ -912,17 +965,25 @@ function StudentDashboard({ user, assessments, attempts: rawAttempts, competenci
                       {Object.keys(a.competencyDistribution).length} Competencies • {a.timeLimit || 30} Mins • {departments.find(d => d.id === a.departmentId)?.name || 'Common'}
                     </p>
                   </div>
-                  {checkEligibility(a.id) ? (
-                    <Button variant="outline" className="w-full sm:w-auto text-xs group" onClick={() => onStartAssessment(a)}>
-                      Start Certification
-                      <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
-                    </Button>
-                  ) : (
-                    <div className="flex items-center gap-2 text-red-500 font-bold text-[10px] uppercase bg-red-50 px-3 py-1.5 rounded-sm">
-                      <AlertCircle className="w-4 h-4" />
-                      Cooling Period Active
-                    </div>
-                  )}
+                  {(() => {
+                    const eligibility = checkEligibility(a.id);
+                    return eligibility.eligible ? (
+                      <Button variant="outline" className="w-full sm:w-auto text-xs group" onClick={() => onStartAssessment(a)}>
+                        Start Certification
+                        <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
+                      </Button>
+                    ) : (
+                      <div className="flex flex-col items-end gap-1">
+                        <div className="flex items-center gap-2 text-red-500 font-bold text-[10px] uppercase bg-red-50 px-3 py-1.5 rounded-sm">
+                          <AlertCircle className="w-4 h-4" />
+                          Cooling Period Active
+                        </div>
+                        <span className="text-[10px] text-gray-500 font-mono">
+                          Unlocks at {new Date(eligibility.cooldownEndsAt!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </div>
+                    );
+                  })()}
                 </motion.div>
               ))}
             </div>
@@ -947,53 +1008,54 @@ function StudentDashboard({ user, assessments, attempts: rawAttempts, competenci
                       initial={{ opacity: 0 }} 
                       animate={{ opacity: 1 }} 
                       transition={{ delay: 0.4 + idx * 0.1 }}
-                      className="flex flex-col sm:flex-row items-start sm:items-center justify-between p-4 bg-gray-50 gap-4 border-l-4 border-[#141414]"
                     >
-                      <div className="flex items-center gap-4">
-                        <div className="w-10 h-10 bg-white border border-gray-200 flex items-center justify-center flex-shrink-0">
-                          {att.certificationStatus === 'certified' ? (
-                            <Award className="text-green-500 w-6 h-6" />
-                          ) : (
-                            <CheckCircle2 className="text-gray-400 w-6 h-6" />
+                      <div className="flex flex-col md:flex-row items-start md:items-center justify-between p-4 bg-white shadow-sm border border-gray-100 rounded-md gap-4 border-l-4 border-l-[#141414]">
+                        <div className="flex items-center gap-4">
+                          <div className="w-10 h-10 bg-gray-50 border border-gray-200 flex items-center justify-center flex-shrink-0 rounded-sm">
+                            {att.certificationStatus === 'certified' ? (
+                              <Award className="text-green-500 w-6 h-6" />
+                            ) : (
+                              <CheckCircle2 className="text-gray-400 w-6 h-6" />
+                            )}
+                          </div>
+                          <div>
+                            <p className="font-bold uppercase text-xs lg:text-sm text-[#141414]">{assessment?.name}</p>
+                            <p className="text-[10px] text-gray-500 font-mono mt-0.5">{new Date(att.timestamp).toLocaleDateString()} • {att.certificationStatus.toUpperCase()}</p>
+                          </div>
+                        </div>
+                        <div className="w-full md:w-auto flex flex-col md:items-end gap-3 mt-2 md:mt-0">
+                          <div className="text-left md:text-right">
+                            <p className="font-black text-2xl lg:text-xl text-[#F27D26]">{Math.round(att.overallScore)}%</p>
+                            <p className="text-[10px] uppercase font-bold text-gray-400">Score</p>
+                          </div>
+                          {att.certificationStatus === 'certified' && (
+                            <div className="flex flex-wrap gap-2 w-full md:justify-end">
+                              <Button 
+                                variant="outline" 
+                                size="sm" 
+                                className="text-[10px] h-7 px-3 bg-white border-gray-200 hover:bg-gray-50"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  generateCertificate(user.name || user.email || 'Student', assessment?.name || 'Assessment', new Date(att.timestamp).toLocaleDateString(), Math.round(att.overallScore));
+                                }}
+                              >
+                                Download PDF
+                              </Button>
+                              <Button 
+                                variant="outline" 
+                                size="sm" 
+                                className="text-[10px] h-7 px-3 text-blue-600 border-blue-200 hover:bg-blue-50"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const url = `https://www.linkedin.com/profile/add?startTask=CERTIFICATION_NAME&name=${encodeURIComponent(assessment?.name || 'ICCF Certification')}&organizationName=${encodeURIComponent('Manav Rachna University')}&issueYear=${new Date(att.timestamp).getFullYear()}&issueMonth=${new Date(att.timestamp).getMonth() + 1}`;
+                                  window.open(url, '_blank');
+                                }}
+                              >
+                                Add to LinkedIn
+                              </Button>
+                            </div>
                           )}
                         </div>
-                        <div>
-                          <p className="font-bold uppercase text-xs lg:text-sm">{assessment?.name}</p>
-                          <p className="text-[10px] text-gray-500 font-mono">{new Date(att.timestamp).toLocaleDateString()} • {att.certificationStatus.toUpperCase()}</p>
-                        </div>
-                      </div>
-                      <div className="text-left sm:text-right w-full sm:w-auto flex flex-col sm:items-end gap-2">
-                        <div>
-                          <p className="font-black text-2xl lg:text-xl">{Math.round(att.overallScore)}%</p>
-                          <p className="text-[10px] uppercase font-bold text-gray-400">Score</p>
-                        </div>
-                        {att.certificationStatus === 'certified' && (
-                          <div className="flex gap-2 mt-2 sm:mt-0">
-                            <Button 
-                              variant="outline" 
-                              size="sm" 
-                              className="text-[10px] h-7 px-2"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                generateCertificate(user.name || user.email || 'Student', assessment?.name || 'Assessment', new Date(att.timestamp).toLocaleDateString(), Math.round(att.overallScore));
-                              }}
-                            >
-                              Download PDF
-                            </Button>
-                            <Button 
-                              variant="outline" 
-                              size="sm" 
-                              className="text-[10px] h-7 px-2 text-blue-600 border-blue-200 hover:bg-blue-50"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                const url = `https://www.linkedin.com/profile/add?startTask=CERTIFICATION_NAME&name=${encodeURIComponent(assessment?.name || 'ICCF Certification')}&organizationName=${encodeURIComponent('Manav Rachna University')}&issueYear=${new Date(att.timestamp).getFullYear()}&issueMonth=${new Date(att.timestamp).getMonth() + 1}`;
-                                window.open(url, '_blank');
-                              }}
-                            >
-                              Add to LinkedIn
-                            </Button>
-                          </div>
-                        )}
                       </div>
                     </motion.div>
                   );
@@ -1013,7 +1075,14 @@ function StudentDashboard({ user, assessments, attempts: rawAttempts, competenci
             </h3>
             {latestAttempt ? (
               <div className="flex-1 flex flex-col">
-                <div className="flex-1 min-h-[300px] sm:min-h-[350px] lg:min-h-[300px] -mx-4 sm:mx-0">
+                <div 
+                  className="flex-1 min-h-[300px] sm:min-h-[350px] lg:min-h-[300px] -mx-4 sm:mx-0 cursor-pointer group relative"
+                  onClick={() => setShowRadarModal(true)}
+                  title="Click to view detailed growth trajectory"
+                >
+                  <div className="absolute inset-0 bg-white/5 opacity-0 group-hover:opacity-100 transition-opacity rounded-md z-10 pointer-events-none flex items-center justify-center">
+                    <span className="bg-[#F27D26] text-white text-xs font-bold px-3 py-1.5 rounded-full shadow-lg">View Growth Trajectory</span>
+                  </div>
                   <ResponsiveContainer width="100%" height="100%">
                     <RadarChart cx="50%" cy="50%" outerRadius="70%" data={radarData}>
                       <PolarGrid stroke="rgba(255,255,255,0.1)" />
@@ -1106,7 +1175,81 @@ function StudentDashboard({ user, assessments, attempts: rawAttempts, competenci
           )}
         </motion.div>
       </div>
-    </div>
+      </div>
+
+      <AnimatePresence>
+        {showRadarModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-[#141414] w-full max-w-5xl rounded-lg shadow-2xl overflow-hidden flex flex-col max-h-[90vh] border border-white/10"
+            >
+              <div className="flex justify-between items-center p-4 border-b border-white/10">
+                <h2 className="text-xl font-bold text-white uppercase tracking-tight flex items-center gap-2">
+                  <BarChart3 className="w-5 h-5 text-[#F27D26]" />
+                  Growth Trajectory Analysis
+                </h2>
+                <button onClick={() => setShowRadarModal(false)} className="text-gray-400 hover:text-white transition-colors">
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+              <div className="p-6 overflow-y-auto custom-scrollbar flex-1 flex flex-col lg:flex-row gap-8">
+                <div className="flex-1 flex flex-col">
+                  <h3 className="text-sm font-bold text-gray-400 uppercase mb-4 text-center">Current Competency Profile</h3>
+                  <div className="w-full aspect-square max-h-[400px] mx-auto">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <RadarChart cx="50%" cy="50%" outerRadius="70%" data={radarData}>
+                        <PolarGrid stroke="rgba(255,255,255,0.1)" />
+                        <PolarAngleAxis dataKey="subject" tick={{ fill: 'rgba(255,255,255,0.6)', fontSize: 10, fontWeight: 600 }} />
+                        <PolarRadiusAxis angle={30} domain={[0, 100]} tickCount={6} tick={false} axisLine={false} />
+                        <Tooltip content={<CustomRadarTooltip />} cursor={false} />
+                        <Radar name="Student" dataKey="A" stroke="#F27D26" fill="#F27D26" fillOpacity={0.6} />
+                      </RadarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                <div className="flex-1 flex flex-col border-t lg:border-t-0 lg:border-l border-white/10 pt-8 lg:pt-0 lg:pl-8">
+                  <h3 className="text-sm font-bold text-gray-400 uppercase mb-4 text-center">Coefficient Wise Growth Trajectory</h3>
+                  <div className="w-full flex-1 min-h-[300px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={coefficientGrowthData} margin={{ top: 5, right: 30, left: 0, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" vertical={false} />
+                        <XAxis dataKey="date" stroke="rgba(255,255,255,0.5)" tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 10 }} axisLine={false} tickLine={false} />
+                        <YAxis stroke="rgba(255,255,255,0.5)" tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 10 }} axisLine={false} tickLine={false} domain={[0, 100]} />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#141414', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', color: '#fff' }}
+                        />
+                        {allCompNames.map((compName, idx) => (
+                          <Line 
+                            key={compName}
+                            type="monotone" 
+                            dataKey={compName} 
+                            stroke={chartColors[idx % chartColors.length]} 
+                            strokeWidth={3}
+                            dot={{ fill: chartColors[idx % chartColors.length], r: 4 }}
+                            activeDot={{ r: 6 }}
+                          />
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-2 justify-center">
+                    {allCompNames.map((compName, idx) => (
+                      <div key={compName} className="flex items-center gap-1.5 text-[10px] text-gray-400">
+                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: chartColors[idx % chartColors.length] }} />
+                        {compName}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </>
   );
 }
 
@@ -1514,7 +1657,7 @@ function AssessmentView({ assessment, competencies, onComplete, onCancel, user }
       skillScores,
       overallScore,
       certificationStatus,
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(getRealTime()).toISOString(),
       
       // Exact strict payload requirements
       student_id: user.uid,
