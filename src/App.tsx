@@ -309,6 +309,7 @@ export default function App() {
           const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
           if (userDoc.exists()) {
             setUser(userDoc.data() as User);
+            setView('dashboard');
             logger.auth('User Login Detected', 'success', { uid: firebaseUser.uid });
           } else {
             const email = firebaseUser.email || '';
@@ -326,11 +327,13 @@ export default function App() {
             };
             await setDoc(doc(db, 'users', firebaseUser.uid), newUser);
             setUser(newUser);
+            setView('dashboard');
             logger.auth('New User Created', 'success', { uid: firebaseUser.uid, role: newUser.role });
           }
         } else {
           if (user) logger.auth('User Logged Out', 'success', { uid: user.uid });
           setUser(null);
+          setView('dashboard');
         }
       } catch (error: any) {
         handleFirestoreError(error, 'auth_state_change');
@@ -736,7 +739,7 @@ export default function App() {
               />
             )}
 
-            {view === 'studentResults' && (
+            {view === 'studentResults' && (user?.role === 'teacher' || user?.role === 'dept_head' || user?.role === 'core_team') && (
               <StudentResultsView
                 attempts={attempts}
                 allUsers={allUsers}
@@ -751,7 +754,7 @@ export default function App() {
               />
             )}
 
-            {view === 'admin' && (
+            {view === 'admin' && (user?.role === 'dept_head' || user?.role === 'core_team') && (
               <AdminManagement 
                 user={user}
                 competencies={competencies}
