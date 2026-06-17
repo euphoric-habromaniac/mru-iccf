@@ -112,3 +112,57 @@ export function scoreRanking(question: any, studentOrder: string[]): number {
 }
 
 // Note: text_answer scoring relies on aiService.ts and is typically invoked during the submission flow.
+
+// --- Teacher/Analytics Helpers ---
+export function calculateAverageScore(attempts: Array<{ overallScore: number }>): number {
+  if (attempts.length === 0) return 0;
+  const total = attempts.reduce((acc, curr) => acc + curr.overallScore, 0);
+  return Number((total / attempts.length).toFixed(1));
+}
+
+export function calculatePassRate(attempts: Array<{ certificationStatus?: string; certification_status?: string }>): number {
+  if (attempts.length === 0) return 0;
+  const certifiedCount = attempts.filter(att => {
+    const status = att.certificationStatus || att.certification_status || '';
+    return status.toLowerCase() === 'certified';
+  }).length;
+  return Number(((certifiedCount / attempts.length) * 100).toFixed(1));
+}
+
+export function calculateCompetencyAverages(
+  attempts: Array<{ skillScores?: Record<string, any>; skill_scores?: Record<string, any> }>,
+  competencies: Array<{ id: string; name: string }>
+) {
+  return competencies.map(comp => {
+    let total = 0;
+    let count = 0;
+
+    attempts.forEach(att => {
+      const scores = att.skillScores || att.skill_scores;
+      if (scores && scores[comp.id] !== undefined) {
+        const val = scores[comp.id];
+        // Handle if score is a raw number or complex SkillScore object
+        const scoreVal = typeof val === 'number' ? val : (val && typeof (val as any) === 'object' && 'percentage' in (val as any) ? (val as any).percentage : 0);
+        total += scoreVal;
+        count++;
+      }
+    });
+
+    return {
+      name: comp.name,
+      average: count > 0 ? Number((total / count).toFixed(1)) : 0
+    };
+  });
+}
+
+export function filterAttemptsByDepartment(
+  attempts: Array<{ userId: string }>,
+  users: Array<{ uid: string; department?: string }>,
+  departmentId: string
+) {
+  if (!departmentId || departmentId.toLowerCase() === 'all') return attempts;
+  return attempts.filter(att => {
+    const userProfile = users.find(u => u.uid === att.userId);
+    return userProfile?.department?.toLowerCase() === departmentId.toLowerCase();
+  });
+}

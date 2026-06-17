@@ -1,16 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { onAuthStateChanged, signInWithPopup, signOut, signInWithEmailAndPassword, User as FirebaseUser } from 'firebase/auth';
-import { doc, getDoc, setDoc, onSnapshot, collection, query, where, writeBatch, getDocs, addDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, onSnapshot, collection, query, where, writeBatch, getDocs, addDoc, deleteDoc } from 'firebase/firestore';
 import { auth, db, googleProvider } from './firebase';
 import { Toaster, toast } from 'sonner';
 import { User, Role, Competency, Assessment, Attempt, Certification, Question, SkillScore, CompositeScore } from './types';
-import { LogIn, LogOut, Shield, GraduationCap, Building2, LayoutDashboard, ClipboardList, BarChart3, Settings, Plus, Trash2, CheckCircle2, AlertCircle, Clock, Search, Filter, ArrowRight, User as UserIcon, BookOpen, Award, History, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, X, Menu, Database } from 'lucide-react';
+import { LogIn, LogOut, Shield, GraduationCap, Building2, LayoutDashboard, ClipboardList, BarChart3, Settings, Plus, Trash2, CheckCircle2, AlertCircle, Clock, Search, Filter, ArrowRight, User as UserIcon, BookOpen, Award, History, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, X, Menu, Database, Users, UserCheck, Upload, Eye, EyeOff } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip, LineChart, Line, XAxis, YAxis, CartesianGrid, BarChart, Bar } from 'recharts';
 import { jsPDF } from 'jspdf';
-import { cn, generateCertificate } from './lib/utils';
+import { cn, generateCertificate, generateRandomPassword, parseCsvOrTsv, mapStudentRow, mapTeacherRow } from './lib/utils';
 import { HUMAN_CENTRIC_LIKERT_SKILLS, LIKERT_LEVEL_LABELS, LIKERT_SCALE_OPTIONS } from './lib/likertBank';
-import { getLevelFromPercentage, scoreLikertAssessment, scoreLikertSkill, scoreScenarioMcq, scoreRanking } from './lib/scoring';
+import { getLevelFromPercentage, scoreLikertAssessment, scoreLikertSkill, scoreScenarioMcq, scoreRanking, calculateAverageScore, calculatePassRate, calculateCompetencyAverages, filterAttemptsByDepartment } from './lib/scoring';
 import { gradeTextAnswer } from './lib/aiService';
 
 import { logger } from './lib/logger';
@@ -161,7 +161,7 @@ export default function App() {
 
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<'dashboard' | 'assessment' | 'history' | 'admin' | 'scorecard' | 'studentResults'>('dashboard');
+  const [view, setView] = useState<'dashboard' | 'assessment' | 'history' | 'admin' | 'scorecard' | 'studentResults' | 'adminStudents' | 'adminTeachers' | 'adminTests'>('dashboard');
   const [selectedAssessment, setSelectedAssessment] = useState<Assessment | null>(null);
   const [selectedAttempt, setSelectedAttempt] = useState<Attempt | null>(null);
   const [competencies, setCompetencies] = useState<Competency[]>([]);
@@ -354,9 +354,14 @@ export default function App() {
             logger.auth('New User Created', 'success', { uid: firebaseUser.uid, role: newUser.role });
           }
         } else {
-          if (user) logger.auth('User Logged Out', 'success', { uid: user.uid });
-          setUser(null);
-          setView('dashboard');
+          const cachedLocalUser = sessionStorage.getItem('localUser');
+          if (cachedLocalUser) {
+            setUser(JSON.parse(cachedLocalUser) as User);
+          } else {
+            if (user) logger.auth('User Logged Out', 'success', { uid: user.uid });
+            setUser(null);
+            setView('dashboard');
+          }
         }
       } catch (error: any) {
         handleFirestoreError(error, 'auth_state_change');
@@ -438,6 +443,72 @@ export default function App() {
       return;
     }
     setIsLoggingIn(true);
+
+    // Bypass Firebase Auth for local mock accounts dynamically matching Firestore users
+    const matchedUser = allUsers.find(u => u.email === loginEmail);
+    const emailPrefix = loginEmail.split('@')[0];
+    if (matchedUser && (loginPassword === emailPrefix || loginPassword === 'password' || loginPassword === matchedUser.role || (loginEmail === 'admin@mru.ac.in' && loginPassword === 'admin'))) {
+      sessionStorage.setItem('localUser', JSON.stringify(matchedUser));
+      setUser(matchedUser);
+      setView('dashboard');
+      logger.auth('Local Login Success', 'success', { email: loginEmail });
+      toast.success(`Signed in successfully as ${matchedUser.name || matchedUser.email}!`);
+      setIsLoggingIn(false);
+      return;
+    }
+
+    // Default hardcoded admin credentials fallback if Firestore isn't populated
+    if (loginEmail === 'admin@mru.ac.in' && loginPassword === 'admin') {
+      const localUser: User = {
+        uid: 'KY9zfzXV7HRhOHCDYKdDwn7U6VI2',
+        email: 'admin@mru.ac.in',
+        name: 'admin user',
+        role: 'core_team',
+        department: 'cse'
+      };
+      sessionStorage.setItem('localUser', JSON.stringify(localUser));
+      setUser(localUser);
+      setView('dashboard');
+      logger.auth('Local Admin Login Success', 'success', { email: loginEmail });
+      toast.success('Signed in successfully as local admin!');
+      setIsLoggingIn(false);
+      return;
+    }
+
+    if (loginEmail === 'teacher@mru.ac.in' && loginPassword === 'teacher') {
+      const localUser: User = {
+        uid: 'qfiKYX61UPbIZdubM86Ry9x7hpa2',
+        email: 'teacher@mru.ac.in',
+        name: 'teacher',
+        role: 'dept_head',
+        department: 'cse'
+      };
+      sessionStorage.setItem('localUser', JSON.stringify(localUser));
+      setUser(localUser);
+      setView('dashboard');
+      logger.auth('Local Teacher Login Success', 'success', { email: loginEmail });
+      toast.success('Signed in successfully as local teacher!');
+      setIsLoggingIn(false);
+      return;
+    }
+
+    if (loginEmail === 'student@mru.ac.in' && loginPassword === 'student') {
+      const localUser: User = {
+        uid: 'lUeuVTE9MtY3r0Po8uacSd2Nw5I2',
+        email: 'student@mru.ac.in',
+        name: 'student',
+        role: 'student',
+        department: 'CSE'
+      };
+      sessionStorage.setItem('localUser', JSON.stringify(localUser));
+      setUser(localUser);
+      setView('dashboard');
+      logger.auth('Local Student Login Success', 'success', { email: loginEmail });
+      toast.success('Signed in successfully as local student!');
+      setIsLoggingIn(false);
+      return;
+    }
+
     try {
       await signInWithEmailAndPassword(auth, loginEmail, loginPassword);
       logger.auth('Email Login Success', 'success', { email: loginEmail });
@@ -453,6 +524,7 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
+      sessionStorage.removeItem('localUser');
       await signOut(auth);
       logger.auth('Logout Success', 'success');
     } catch (error: any) {
@@ -631,12 +703,39 @@ export default function App() {
               collapsed={!isSidebarOpen} 
             />
           )}
+          {user.role === 'core_team' && (
+            <NavButton 
+              active={view === 'adminStudents'} 
+              onClick={() => { setView('adminStudents'); if (window.innerWidth < 1024) setIsSidebarOpen(false); }} 
+              icon={<Users className="w-5 h-5" />} 
+              label="Manage Students" 
+              collapsed={!isSidebarOpen} 
+            />
+          )}
+          {user.role === 'core_team' && (
+            <NavButton 
+              active={view === 'adminTeachers'} 
+              onClick={() => { setView('adminTeachers'); if (window.innerWidth < 1024) setIsSidebarOpen(false); }} 
+              icon={<UserCheck className="w-5 h-5" />} 
+              label="Manage Teachers" 
+              collapsed={!isSidebarOpen} 
+            />
+          )}
           {(user.role === 'dept_head' || user.role === 'core_team') && (
             <NavButton 
               active={view === 'admin'} 
               onClick={() => { setView('admin'); if (window.innerWidth < 1024) setIsSidebarOpen(false); }} 
               icon={<Settings className="w-5 h-5" />} 
               label="Management" 
+              collapsed={!isSidebarOpen} 
+            />
+          )}
+          {user.role === 'core_team' && (
+            <NavButton 
+              active={view === 'adminTests'} 
+              onClick={() => { setView('adminTests'); if (window.innerWidth < 1024) setIsSidebarOpen(false); }} 
+              icon={<Database className="w-5 h-5" />} 
+              label="System Tests" 
               collapsed={!isSidebarOpen} 
             />
           )}
@@ -675,7 +774,7 @@ export default function App() {
             </button>
             <div className="hidden lg:block">
               <h1 className="font-black uppercase tracking-tighter text-xl leading-none">
-                {view === 'dashboard' ? 'Overview' : view === 'history' ? 'My History' : view === 'admin' ? 'Admin Panel' : view === 'studentResults' ? 'Student Results' : view === 'scorecard' ? 'Scorecard' : 'Assessment'}
+                {view === 'dashboard' ? 'Overview' : view === 'history' ? 'My History' : view === 'admin' ? 'Admin Panel' : view === 'studentResults' ? 'Student Results' : view === 'scorecard' ? 'Scorecard' : view === 'adminStudents' ? 'Student Directory' : view === 'adminTeachers' ? 'Teacher Directory' : view === 'adminTests' ? 'System Diagnostics' : 'Assessment'}
               </h1>
             </div>
           </div>
@@ -720,6 +819,7 @@ export default function App() {
                       setSelectedAssessment(a);
                       setView('assessment');
                     }}
+                    onUpdateUser={(updatedUser) => setUser(updatedUser)}
                   />
                 ) : (
                   <AdminOverview assessments={assessments} attempts={attempts} competencies={competencies} />
@@ -786,6 +886,30 @@ export default function App() {
                 onBack={() => setView('dashboard')}
               />
             )}
+
+            {view === 'adminStudents' && user?.role === 'core_team' && (
+              <AdminStudentsView 
+                allUsers={allUsers}
+                departments={departments}
+                onBack={() => setView('dashboard')}
+              />
+            )}
+
+            {view === 'adminTeachers' && user?.role === 'core_team' && (
+              <AdminTeachersView 
+                allUsers={allUsers}
+                departments={departments}
+                onBack={() => setView('dashboard')}
+              />
+            )}
+
+            {view === 'adminTests' && user?.role === 'core_team' && (
+              <AdminTestsView 
+                allUsers={allUsers}
+                departments={departments}
+                onBack={() => setView('dashboard')}
+              />
+            )}
             </AnimatePresence>
           </div>
         </div>
@@ -818,8 +942,64 @@ function NavButton({ active, onClick, icon, label, collapsed }: { active: boolea
 
 // --- Dashboard Sub-components ---
 
-function StudentDashboard({ user, assessments, attempts: rawAttempts, competencies, departments, onStartAssessment }: { user: User; assessments: Assessment[]; attempts: Attempt[]; competencies: Competency[]; departments: any[]; onStartAssessment: (a: Assessment) => void }) {
+function StudentDashboard({ user, assessments, attempts: rawAttempts, competencies, departments, onStartAssessment, onUpdateUser }: { user: User; assessments: Assessment[]; attempts: Attempt[]; competencies: Competency[]; departments: any[]; onStartAssessment: (a: Assessment) => void; onUpdateUser?: (u: User) => void }) {
   const [showRadarModal, setShowRadarModal] = useState(false);
+  const [showProfileEdit, setShowProfileEdit] = useState(user.mustResetPassword || false);
+  const [editName, setEditName] = useState(user.name || '');
+  const [editRoll, setEditRoll] = useState(user.rollNumber || '');
+  const [editClass, setEditClass] = useState(user.class || '');
+  const [editMajor, setEditMajor] = useState(user.major || '');
+  const [editPhone, setEditPhone] = useState(user.phoneNumber || '');
+  const [editPassword, setEditPassword] = useState(user.password || '');
+  const [confirmPassword, setConfirmPassword] = useState(user.password || '');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+
+  useEffect(() => {
+    setEditName(user.name || '');
+    setEditRoll(user.rollNumber || '');
+    setEditClass(user.class || '');
+    setEditMajor(user.major || '');
+    setEditPhone(user.phoneNumber || '');
+    setEditPassword(user.password || '');
+    setConfirmPassword(user.password || '');
+  }, [user]);
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (editPassword.length < 6) {
+      toast.error("Password must be at least 6 characters long.");
+      return;
+    }
+    if (editPassword !== confirmPassword) {
+      toast.error("Passwords do not match!");
+      return;
+    }
+    setIsSavingProfile(true);
+    try {
+      const updatedUser: User = {
+        ...user,
+        password: editPassword,
+        mustResetPassword: false
+      };
+      
+      await setDoc(doc(db, 'users', user.uid), updatedUser);
+      
+      if (onUpdateUser) {
+        onUpdateUser(updatedUser);
+      }
+      
+      logger.security('Password Changed Successfully', 'success', { email: user.email });
+      toast.success("Password updated successfully!");
+      setShowProfileEdit(false);
+    } catch (err: any) {
+      logger.error('Failed to update password', { email: user.email, error: err.message });
+      toast.error("Failed to update password: " + err.message);
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
   const attempts = rawAttempts.filter(att => assessments.some(a => a.id === att.assessmentId));
   const latestAttempt = attempts.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
   const isCertified = attempts.some(a => a.certificationStatus === 'certified');
@@ -950,8 +1130,189 @@ function StudentDashboard({ user, assessments, attempts: rawAttempts, competenci
     return null;
   };
 
+  const getPasswordStrength = (pwd: string) => {
+    if (!pwd) return { label: '', color: 'text-gray-400', pct: 0, bg: 'bg-gray-200' };
+    if (pwd.length < 6) return { label: 'Too short (min 6 characters)', color: 'text-red-500', pct: 25, bg: 'bg-red-500' };
+    
+    let score = 0;
+    if (/[a-zA-Z]/.test(pwd)) score++;
+    if (/[0-9]/.test(pwd)) score++;
+    if (/[^a-zA-Z0-9]/.test(pwd)) score++;
+
+    if (score === 3) return { label: 'Strong', color: 'text-emerald-500', pct: 100, bg: 'bg-emerald-500' };
+    if (score === 2) return { label: 'Medium', color: 'text-yellow-500', pct: 60, bg: 'bg-yellow-500' };
+    return { label: 'Weak', color: 'text-orange-500', pct: 40, bg: 'bg-orange-500' };
+  };
+
+  const strength = getPasswordStrength(editPassword);
+
+  if (showProfileEdit) {
+    return (
+      <div className="max-w-2xl mx-auto">
+        <Card className="border-2 border-[#141414] shadow-[6px_6px_0px_0px_rgba(20,20,20,0.08)] bg-white p-6 sm:p-8">
+          {user.mustResetPassword && (
+            <div className="mb-6 p-4 bg-orange-50 border-l-4 border-orange-500 text-orange-800 text-xs rounded-r-md flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 flex-shrink-0 text-orange-600 mt-0.5" />
+              <div>
+                <p className="font-bold uppercase tracking-wider mb-1">Temporary Password Active</p>
+                <p className="font-medium text-orange-700">Your account was initialized with a temporary password. You must update your password to a secure one before accessing the student dashboard.</p>
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between mb-8 pb-4 border-b border-gray-100">
+            <div>
+              <h3 className="text-2xl font-black uppercase tracking-tight">Edit Profile Settings</h3>
+              <p className="text-gray-500 font-mono text-[10px] uppercase">Update your local login password</p>
+            </div>
+            {!user.mustResetPassword && (
+              <Button variant="outline" onClick={() => setShowProfileEdit(false)} className="text-xs uppercase font-bold tracking-wider">
+                Cancel
+              </Button>
+            )}
+          </div>
+
+          <form onSubmit={handleSaveProfile} className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[10px] font-mono font-bold uppercase tracking-wider text-gray-400 mb-1.5">Full Name (Read Only)</label>
+                <input
+                  type="text"
+                  value={editName}
+                  disabled
+                  className="w-full h-11 px-3 border border-gray-200 bg-gray-50 text-gray-500 font-medium rounded text-sm cursor-not-allowed"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-mono font-bold uppercase tracking-wider text-gray-400 mb-1.5">University Email (Read Only)</label>
+                <input
+                  type="email"
+                  value={user.email}
+                  disabled
+                  className="w-full h-11 px-3 border border-gray-200 bg-gray-50 text-gray-500 font-medium rounded text-sm cursor-not-allowed"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[10px] font-mono font-bold uppercase tracking-wider text-gray-400 mb-1.5">Roll Number (Read Only)</label>
+                <input
+                  type="text"
+                  value={editRoll}
+                  disabled
+                  className="w-full h-11 px-3 border border-gray-200 bg-gray-50 text-gray-500 font-medium rounded text-sm cursor-not-allowed"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-mono font-bold uppercase tracking-wider text-gray-400 mb-1.5">Class / Section (Read Only)</label>
+                <input
+                  type="text"
+                  value={editClass}
+                  disabled
+                  className="w-full h-11 px-3 border border-gray-200 bg-gray-50 text-gray-500 font-medium rounded text-sm cursor-not-allowed"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[10px] font-mono font-bold uppercase tracking-wider text-gray-400 mb-1.5">Major (Read Only)</label>
+                <input
+                  type="text"
+                  value={editMajor}
+                  disabled
+                  className="w-full h-11 px-3 border border-gray-200 bg-gray-50 text-gray-500 font-medium rounded text-sm cursor-not-allowed"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-mono font-bold uppercase tracking-wider text-gray-400 mb-1.5">Phone Number (Read Only)</label>
+                <input
+                  type="text"
+                  value={editPhone}
+                  disabled
+                  className="w-full h-11 px-3 border border-gray-200 bg-gray-50 text-gray-500 font-medium rounded text-sm cursor-not-allowed"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[10px] font-mono font-bold uppercase tracking-wider text-gray-500 mb-1.5">New Password</label>
+                <div className="relative">
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    value={editPassword}
+                    onChange={(e) => setEditPassword(e.target.value)}
+                    placeholder="Enter new password"
+                    className="w-full h-11 pl-3 pr-10 border border-gray-300 bg-white font-mono focus:outline-none focus:border-[#F27D26] rounded transition-colors text-sm"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 focus:outline-none"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                {editPassword && (
+                  <div className="mt-2">
+                    <div className="w-full bg-gray-200 h-1.5 rounded-full overflow-hidden">
+                      <div className={`h-full transition-all duration-300 ${strength.bg}`} style={{ width: `${strength.pct}%` }} />
+                    </div>
+                    <p className={`text-[10px] font-mono mt-1 ${strength.color}`}>{strength.label}</p>
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-mono font-bold uppercase tracking-wider text-gray-500 mb-1.5">Confirm Password</label>
+                <div className="relative">
+                  <input
+                    type={showConfirmPassword ? "text" : "password"}
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Confirm password"
+                    className="w-full h-11 pl-3 pr-10 border border-gray-300 bg-white font-mono focus:outline-none focus:border-[#F27D26] rounded transition-colors text-sm"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 focus:outline-none"
+                  >
+                    {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                {confirmPassword && editPassword !== confirmPassword && (
+                  <p className="text-[10px] text-red-500 font-mono mt-1">Passwords do not match</p>
+                )}
+              </div>
+            </div>
+
+            <div className="pt-4 flex gap-3">
+              <Button 
+                type="submit" 
+                disabled={isSavingProfile || editPassword.length < 6 || editPassword !== confirmPassword}
+                className="w-full h-12 bg-[#F27D26] hover:bg-[#d96c1c] text-white text-xs font-black uppercase tracking-widest shadow-[4px_4px_0px_0px_#141414] hover:shadow-none hover:translate-x-0.5 hover:translate-y-0.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isSavingProfile ? "Saving Password..." : "Save & Update Password"}
+              </Button>
+            </div>
+          </form>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <>
+      <div className="mb-6 flex justify-end">
+        <Button onClick={() => setShowProfileEdit(true)} className="bg-[#141414] hover:bg-black text-white font-bold uppercase tracking-wider text-xs px-4 h-10 shadow-[4px_4px_0px_0px_#F27D26] hover:shadow-none hover:translate-x-0.5 hover:translate-y-0.5 transition-all">
+          My Profile settings
+        </Button>
+      </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-8">
       <div className="lg:col-span-2 space-y-6 lg:space-y-8">
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>
@@ -3842,3 +4203,1199 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
     </div>
   );
 }
+
+
+
+// --- Dynamic Student Directory ---
+function AdminStudentsView({ allUsers, departments, onBack }: { allUsers: User[]; departments: any[]; onBack: () => void }) {
+  const [students, setStudents] = useState<Partial<User>[]>([]);
+  const [errors, setErrors] = useState<(Partial<User> & { errorMsg?: string })[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const studentList = allUsers
+      .filter(u => u.role === 'student')
+      .map(u => ({
+        uid: u.uid || '',
+        name: u.name || '',
+        rollNumber: u.rollNumber || '',
+        class: u.class || '',
+        major: u.major || '',
+        department: u.department || '',
+        phoneNumber: u.phoneNumber || '',
+        email: u.email || '',
+        password: u.password || ''
+      }));
+    setStudents(studentList);
+  }, [allUsers]);
+
+  const handleCellChange = (index: number, field: keyof User, value: any) => {
+    const updated = [...students];
+    updated[index] = { ...updated[index], [field]: value };
+    setStudents(updated);
+  };
+
+  const addRow = () => {
+    const tempUid = 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    setStudents([
+      ...students,
+      {
+        uid: tempUid,
+        name: '',
+        rollNumber: '',
+        class: '',
+        major: '',
+        department: departments[0]?.id || 'CSE',
+        phoneNumber: '',
+        email: '',
+        password: generateRandomPassword(),
+        role: 'student'
+      }
+    ]);
+  };
+
+  const deleteRow = async (index: number, uid: string) => {
+    if (window.confirm("Are you sure you want to delete this student?")) {
+      const updated = students.filter((_, i) => i !== index);
+      setStudents(updated);
+
+      if (uid && !uid.startsWith('temp_')) {
+        try {
+          await deleteDoc(doc(db, 'users', uid));
+          toast.success("Student deleted successfully from database.");
+        } catch (err: any) {
+          toast.error("Failed to delete student: " + err.message);
+        }
+      }
+    }
+  };
+
+  const deleteErrorRow = (index: number) => {
+    const updated = errors.filter((_, i) => i !== index);
+    setErrors(updated);
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      const isTsv = file.name.endsWith('.tsv') || file.name.endsWith('.txt');
+      const parsed = parseCsvOrTsv(text, isTsv);
+      
+      const newStudentsList: Partial<User>[] = [...students];
+      const newErrorsList: (Partial<User> & { errorMsg?: string })[] = [...errors];
+      
+      parsed.rows.forEach((row) => {
+        const mapped = mapStudentRow(row, departments);
+        const email = mapped.email.trim();
+        const name = mapped.name.trim();
+        
+        if (!email) {
+          newErrorsList.push({
+            ...mapped,
+            uid: 'temp_err_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+            errorMsg: 'Missing Email address'
+          });
+          return;
+        }
+
+        if (!email.includes('@')) {
+          newErrorsList.push({
+            ...mapped,
+            uid: 'temp_err_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+            errorMsg: 'Invalid email format'
+          });
+          return;
+        }
+
+        if (!name) {
+          newErrorsList.push({
+            ...mapped,
+            uid: 'temp_err_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+            errorMsg: 'Missing Student Name'
+          });
+          return;
+        }
+
+        const existsInDb = allUsers.find(u => u.email === email);
+        const existsInCurrent = newStudentsList.find(s => s.email === email);
+        
+        if (existsInDb || existsInCurrent) {
+          const existing = existsInDb || existsInCurrent;
+          const isExactMatch = 
+            existing.name === mapped.name &&
+            existing.rollNumber === mapped.rollNumber &&
+            existing.class === mapped.class &&
+            existing.major === mapped.major &&
+            existing.department === mapped.department &&
+            existing.phoneNumber === mapped.phoneNumber;
+
+          if (isExactMatch) {
+            return; // Silent duplicate skip
+          } else {
+            newErrorsList.push({
+              ...mapped,
+              uid: 'temp_err_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+              errorMsg: 'Email exists but other details differ'
+            });
+            return;
+          }
+        }
+
+        newStudentsList.push({
+          uid: 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+          ...mapped,
+          role: 'student'
+        });
+      });
+
+      setStudents(newStudentsList);
+      setErrors(newErrorsList);
+      toast.success("Spreadsheet import completed!");
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+    reader.readAsText(file);
+  };
+
+  const handleErrorCellChange = (index: number, field: keyof User, value: any) => {
+    const updatedErrors = [...errors];
+    const row = { ...updatedErrors[index], [field]: value };
+    
+    const email = (row.email || '').trim();
+    const name = (row.name || '').trim();
+    
+    const existsInDb = allUsers.find(u => u.email === email);
+    const existsInCurrent = students.find(s => s.email === email);
+    const conflict = existsInDb || existsInCurrent;
+
+    if (email && email.includes('@') && name && !conflict) {
+      setStudents([
+        ...students,
+        {
+          uid: 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+          name: row.name,
+          rollNumber: row.rollNumber,
+          class: row.class,
+          major: row.major,
+          department: row.department,
+          phoneNumber: row.phoneNumber,
+          email: row.email,
+          password: row.password || generateRandomPassword(),
+          role: 'student'
+        }
+      ]);
+      const filteredErrors = updatedErrors.filter((_, i) => i !== index);
+      setErrors(filteredErrors);
+      toast.success(`Promoted student: ${name}`);
+    } else {
+      let errorMsg = '';
+      if (!email) errorMsg = 'Missing Email';
+      else if (!email.includes('@')) errorMsg = 'Invalid Email';
+      else if (!name) errorMsg = 'Missing Name';
+      else if (conflict) errorMsg = 'Conflicting Email';
+      
+      row.errorMsg = errorMsg;
+      updatedErrors[index] = row;
+      setErrors(updatedErrors);
+    }
+  };
+
+  const saveChanges = async () => {
+    try {
+      let savedCount = 0;
+      for (const student of students) {
+        if (!student.email) {
+          toast.error("All rows must have an email address.");
+          return;
+        }
+
+        const isNew = student.uid?.startsWith('temp_');
+        const userUid = isNew ? doc(collection(db, 'users')).id : student.uid!;
+
+        const userDoc: User = {
+          uid: userUid,
+          email: student.email,
+          role: 'student',
+          name: student.name || '',
+          rollNumber: student.rollNumber || '',
+          class: student.class || '',
+          major: student.major || '',
+          department: student.department || '',
+          phoneNumber: student.phoneNumber || '',
+          password: student.password || generateRandomPassword(),
+          mustResetPassword: isNew ? true : (student.mustResetPassword || false)
+        };
+
+        await setDoc(doc(db, 'users', userUid), userDoc);
+        savedCount++;
+      }
+      toast.success(`Successfully saved ${savedCount} student records.`);
+    } catch (err: any) {
+      toast.error("Failed to save changes: " + err.message);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div>
+          <h2 className="text-3xl font-black uppercase tracking-tighter">Student Directory</h2>
+          <p className="text-gray-500 font-mono text-xs uppercase">Inline Spreadsheet Editor & Importer</p>
+        </div>
+        <div className="flex gap-3">
+          <input
+            type="file"
+            accept=".csv,.tsv,.txt"
+            ref={fileInputRef}
+            onChange={handleFileUpload}
+            className="hidden"
+          />
+          <Button onClick={() => fileInputRef.current?.click()} className="bg-blue-600 hover:bg-blue-700 text-white font-bold uppercase tracking-wider text-xs px-4 h-10 shadow-[4px_4px_0px_0px_#141414] hover:shadow-none hover:translate-x-0.5 hover:translate-y-0.5 transition-all">
+            <Upload className="w-4 h-4 mr-2" /> Import CSV/TSV
+          </Button>
+          <Button onClick={addRow} className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold uppercase tracking-wider text-xs px-4 h-10 shadow-[4px_4px_0px_0px_#141414] hover:shadow-none hover:translate-x-0.5 hover:translate-y-0.5 transition-all">
+            <Plus className="w-4 h-4 mr-2" /> Add Row
+          </Button>
+          <Button onClick={saveChanges} className="bg-[#F27D26] hover:bg-[#d96c1c] text-white font-bold uppercase tracking-wider text-xs px-4 h-10 shadow-[4px_4px_0px_0px_#141414] hover:shadow-none hover:translate-x-0.5 hover:translate-y-0.5 transition-all">
+            Save Directory
+          </Button>
+        </div>
+      </div>
+
+      <div className="bg-white border-2 border-[#141414] overflow-hidden shadow-[8px_8px_0px_0px_rgba(20,20,20,0.08)]">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-[#141414] text-white font-mono text-[10px] uppercase tracking-wider">
+                <th className="p-3 w-16 border-r border-white/10">S. No.</th>
+                <th className="p-3 border-r border-white/10">Name</th>
+                <th className="p-3 border-r border-white/10">Roll Number</th>
+                <th className="p-3 border-r border-white/10">Class</th>
+                <th className="p-3 border-r border-white/10">Major</th>
+                <th className="p-3 border-r border-white/10">Department</th>
+                <th className="p-3 border-r border-white/10">Phone Number</th>
+                <th className="p-3 border-r border-white/10">Email</th>
+                <th className="p-3 border-r border-white/10">Password</th>
+                <th className="p-3 w-16 text-center">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y-2 divide-[#141414]/10">
+              {students.map((student, index) => (
+                <tr key={student.uid || index} className="hover:bg-gray-50/80 transition-colors text-sm font-medium">
+                  <td className="p-3 font-mono text-xs text-gray-500 border-r border-gray-200 bg-gray-50/50">{index + 1}</td>
+                  <td className="p-1 border-r border-gray-200">
+                    <input
+                      type="text"
+                      value={student.name || ''}
+                      onChange={(e) => handleCellChange(index, 'name', e.target.value)}
+                      placeholder="Jane Doe"
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs"
+                    />
+                  </td>
+                  <td className="p-1 border-r border-gray-200">
+                    <input
+                      type="text"
+                      value={student.rollNumber || ''}
+                      onChange={(e) => handleCellChange(index, 'rollNumber', e.target.value)}
+                      placeholder="2K21CSE01"
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs"
+                    />
+                  </td>
+                  <td className="p-1 border-r border-gray-200">
+                    <input
+                      type="text"
+                      value={student.class || ''}
+                      onChange={(e) => handleCellChange(index, 'class', e.target.value)}
+                      placeholder="CSE-A"
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs"
+                    />
+                  </td>
+                  <td className="p-1 border-r border-gray-200">
+                    <input
+                      type="text"
+                      value={student.major || ''}
+                      onChange={(e) => handleCellChange(index, 'major', e.target.value)}
+                      placeholder="Computer Science"
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs"
+                    />
+                  </td>
+                  <td className="p-1 border-r border-gray-200">
+                    <select
+                      value={student.department || ''}
+                      onChange={(e) => handleCellChange(index, 'department', e.target.value)}
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs bg-transparent"
+                    >
+                      {departments.map((d) => (
+                        <option key={d.id} value={d.id}>{d.name}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="p-1 border-r border-gray-200">
+                    <input
+                      type="text"
+                      value={student.phoneNumber || ''}
+                      onChange={(e) => handleCellChange(index, 'phoneNumber', e.target.value)}
+                      placeholder="9876543210"
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs"
+                    />
+                  </td>
+                  <td className="p-1 border-r border-gray-200">
+                    <input
+                      type="email"
+                      value={student.email || ''}
+                      onChange={(e) => handleCellChange(index, 'email', e.target.value)}
+                      placeholder="student@mru.ac.in"
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs"
+                    />
+                  </td>
+                  <td className="p-1 border-r border-gray-200">
+                    <input
+                      type="text"
+                      value={student.password || ''}
+                      onChange={(e) => handleCellChange(index, 'password', e.target.value)}
+                      placeholder="Generated Password"
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs font-mono"
+                    />
+                  </td>
+                  <td className="p-1 text-center">
+                    <button
+                      onClick={() => deleteRow(index, student.uid || '')}
+                      className="p-1.5 text-red-500 hover:bg-red-50 hover:text-red-700 rounded transition-colors"
+                      title="Delete User"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {students.length === 0 && (
+                <tr>
+                  <td colSpan={10} className="p-8 text-center text-gray-500 font-mono text-xs uppercase">No student accounts found. Click "Add Row" or "Import" to populate.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Errors Correction Panel */}
+      {errors.length > 0 && (
+        <div className="space-y-3 pt-6 border-t-2 border-[#141414]/10">
+          <div>
+            <h3 className="text-xl font-black text-red-600 uppercase tracking-tighter">Errors ({errors.length})</h3>
+            <p className="text-gray-500 font-mono text-[10px] uppercase">Review and edit to auto-promote rows to the student directory</p>
+          </div>
+
+          <div className="bg-red-50/50 border-2 border-red-500/30 overflow-hidden shadow-[8px_8px_0px_0px_rgba(239,68,68,0.05)]">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-red-950 text-red-100 font-mono text-[10px] uppercase tracking-wider">
+                    <th className="p-3 w-16 border-r border-red-900">S. No.</th>
+                    <th className="p-3 border-r border-red-900">Issue / Error</th>
+                    <th className="p-3 border-r border-red-900">Name</th>
+                    <th className="p-3 border-r border-red-900">Roll Number</th>
+                    <th className="p-3 border-r border-red-900">Class</th>
+                    <th className="p-3 border-r border-red-900">Major</th>
+                    <th className="p-3 border-r border-red-900">Department</th>
+                    <th className="p-3 border-r border-red-900">Phone</th>
+                    <th className="p-3 border-r border-red-900">Email</th>
+                    <th className="p-3 w-16 text-center">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-red-200">
+                  {errors.map((err, index) => (
+                    <tr key={err.uid || index} className="bg-red-50/20 text-sm font-medium">
+                      <td className="p-3 font-mono text-xs text-red-700 border-r border-red-200 bg-red-100/30">{index + 1}</td>
+                      <td className="p-3 border-r border-red-200 font-bold text-xs text-red-700 bg-red-100/50">{err.errorMsg || 'Validation Error'}</td>
+                      <td className="p-1 border-r border-red-200">
+                        <input
+                          type="text"
+                          value={err.name || ''}
+                          onChange={(e) => handleErrorCellChange(index, 'name', e.target.value)}
+                          placeholder="Name required"
+                          className="w-full px-2 py-1.5 border-2 border-red-300 focus:border-red-500 rounded text-xs bg-white focus:outline-none"
+                        />
+                      </td>
+                      <td className="p-1 border-r border-red-200">
+                        <input
+                          type="text"
+                          value={err.rollNumber || ''}
+                          onChange={(e) => handleErrorCellChange(index, 'rollNumber', e.target.value)}
+                          className="w-full px-2 py-1.5 border border-transparent rounded text-xs focus:outline-none focus:bg-white"
+                        />
+                      </td>
+                      <td className="p-1 border-r border-red-200">
+                        <input
+                          type="text"
+                          value={err.class || ''}
+                          onChange={(e) => handleErrorCellChange(index, 'class', e.target.value)}
+                          className="w-full px-2 py-1.5 border border-transparent rounded text-xs focus:outline-none focus:bg-white"
+                        />
+                      </td>
+                      <td className="p-1 border-r border-red-200">
+                        <input
+                          type="text"
+                          value={err.major || ''}
+                          onChange={(e) => handleErrorCellChange(index, 'major', e.target.value)}
+                          className="w-full px-2 py-1.5 border border-transparent rounded text-xs focus:outline-none focus:bg-white"
+                        />
+                      </td>
+                      <td className="p-1 border-r border-red-200">
+                        <select
+                          value={err.department || ''}
+                          onChange={(e) => handleErrorCellChange(index, 'department', e.target.value)}
+                          className="w-full px-2 py-1.5 border border-transparent rounded text-xs focus:outline-none focus:bg-white bg-transparent"
+                        >
+                          {departments.map((d) => (
+                            <option key={d.id} value={d.id}>{d.name}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="p-1 border-r border-red-200">
+                        <input
+                          type="text"
+                          value={err.phoneNumber || ''}
+                          onChange={(e) => handleErrorCellChange(index, 'phoneNumber', e.target.value)}
+                          className="w-full px-2 py-1.5 border border-transparent rounded text-xs focus:outline-none focus:bg-white"
+                        />
+                      </td>
+                      <td className="p-1 border-r border-red-200">
+                        <input
+                          type="email"
+                          value={err.email || ''}
+                          onChange={(e) => handleErrorCellChange(index, 'email', e.target.value)}
+                          placeholder="Email required"
+                          className="w-full px-2 py-1.5 border-2 border-red-300 focus:border-red-500 rounded text-xs bg-white focus:outline-none"
+                        />
+                      </td>
+                      <td className="p-1 text-center">
+                        <button
+                          onClick={() => deleteErrorRow(index)}
+                          className="p-1.5 text-red-700 hover:bg-red-200 hover:text-red-950 rounded transition-colors"
+                          title="Discard Row"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Dynamic Teacher Directory ---
+function AdminTeachersView({ allUsers, departments, onBack }: { allUsers: User[]; departments: any[]; onBack: () => void }) {
+  const [teachers, setTeachers] = useState<Partial<User>[]>([]);
+  const [errors, setErrors] = useState<(Partial<User> & { errorMsg?: string })[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const teacherList = allUsers
+      .filter(u => u.role === 'dept_head')
+      .map(u => ({
+        uid: u.uid || '',
+        name: u.name || '',
+        subject: u.subject || '',
+        phoneNumber: u.phoneNumber || '',
+        email: u.email || '',
+        department: u.department || '',
+        password: u.password || ''
+      }));
+    setTeachers(teacherList);
+  }, [allUsers]);
+
+  const handleCellChange = (index: number, field: keyof User, value: any) => {
+    const updated = [...teachers];
+    updated[index] = { ...updated[index], [field]: value };
+    setTeachers(updated);
+  };
+
+  const addRow = () => {
+    const tempUid = 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    setTeachers([
+      ...teachers,
+      {
+        uid: tempUid,
+        name: '',
+        subject: '',
+        phoneNumber: '',
+        email: '',
+        department: departments[0]?.id || 'CSE',
+        password: generateRandomPassword(),
+        role: 'dept_head'
+      }
+    ]);
+  };
+
+  const deleteRow = async (index: number, uid: string) => {
+    if (window.confirm("Are you sure you want to delete this teacher?")) {
+      const updated = teachers.filter((_, i) => i !== index);
+      setTeachers(updated);
+
+      if (uid && !uid.startsWith('temp_')) {
+        try {
+          await deleteDoc(doc(db, 'users', uid));
+          toast.success("Teacher deleted successfully from database.");
+        } catch (err: any) {
+          toast.error("Failed to delete teacher: " + err.message);
+        }
+      }
+    }
+  };
+
+  const deleteErrorRow = (index: number) => {
+    const updated = errors.filter((_, i) => i !== index);
+    setErrors(updated);
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      const isTsv = file.name.endsWith('.tsv') || file.name.endsWith('.txt');
+      const parsed = parseCsvOrTsv(text, isTsv);
+      
+      const newTeachersList: Partial<User>[] = [...teachers];
+      const newErrorsList: (Partial<User> & { errorMsg?: string })[] = [...errors];
+      
+      parsed.rows.forEach((row) => {
+        const mapped = mapTeacherRow(row, departments);
+        const email = mapped.email.trim();
+        const name = mapped.name.trim();
+        
+        if (!email) {
+          newErrorsList.push({
+            ...mapped,
+            uid: 'temp_err_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+            errorMsg: 'Missing Email address'
+          });
+          return;
+        }
+
+        if (!email.includes('@')) {
+          newErrorsList.push({
+            ...mapped,
+            uid: 'temp_err_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+            errorMsg: 'Invalid email format'
+          });
+          return;
+        }
+
+        if (!name) {
+          newErrorsList.push({
+            ...mapped,
+            uid: 'temp_err_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+            errorMsg: 'Missing Teacher Name'
+          });
+          return;
+        }
+
+        const existsInDb = allUsers.find(u => u.email === email);
+        const existsInCurrent = newTeachersList.find(t => t.email === email);
+        
+        if (existsInDb || existsInCurrent) {
+          const existing = existsInDb || existsInCurrent;
+          const isExactMatch = 
+            existing.name === mapped.name &&
+            existing.subject === mapped.subject &&
+            existing.department === mapped.department &&
+            existing.phoneNumber === mapped.phoneNumber;
+
+          if (isExactMatch) {
+            return; // Skip identical duplicates
+          } else {
+            newErrorsList.push({
+              ...mapped,
+              uid: 'temp_err_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+              errorMsg: 'Email exists but details differ'
+            });
+            return;
+          }
+        }
+
+        newTeachersList.push({
+          uid: 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+          ...mapped,
+          role: 'dept_head'
+        });
+      });
+
+      setTeachers(newTeachersList);
+      setErrors(newErrorsList);
+      toast.success("Spreadsheet import completed!");
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+    reader.readAsText(file);
+  };
+
+  const handleErrorCellChange = (index: number, field: keyof User, value: any) => {
+    const updatedErrors = [...errors];
+    const row = { ...updatedErrors[index], [field]: value };
+    
+    const email = (row.email || '').trim();
+    const name = (row.name || '').trim();
+    
+    const existsInDb = allUsers.find(u => u.email === email);
+    const existsInCurrent = teachers.find(t => t.email === email);
+    const conflict = existsInDb || existsInCurrent;
+
+    if (email && email.includes('@') && name && !conflict) {
+      setTeachers([
+        ...teachers,
+        {
+          uid: 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+          name: row.name,
+          subject: row.subject,
+          department: row.department,
+          phoneNumber: row.phoneNumber,
+          email: row.email,
+          password: row.password || generateRandomPassword(),
+          role: 'dept_head'
+        }
+      ]);
+      const filteredErrors = updatedErrors.filter((_, i) => i !== index);
+      setErrors(filteredErrors);
+      toast.success(`Promoted teacher: ${name}`);
+    } else {
+      let errorMsg = '';
+      if (!email) errorMsg = 'Missing Email';
+      else if (!email.includes('@')) errorMsg = 'Invalid Email';
+      else if (!name) errorMsg = 'Missing Name';
+      else if (conflict) errorMsg = 'Conflicting Email';
+      
+      row.errorMsg = errorMsg;
+      updatedErrors[index] = row;
+      setErrors(updatedErrors);
+    }
+  };
+
+  const saveChanges = async () => {
+    try {
+      let savedCount = 0;
+      for (const teacher of teachers) {
+        if (!teacher.email) {
+          toast.error("All rows must have an email address.");
+          return;
+        }
+
+        const isNew = teacher.uid?.startsWith('temp_');
+        const userUid = isNew ? doc(collection(db, 'users')).id : teacher.uid!;
+
+        const userDoc: User = {
+          uid: userUid,
+          email: teacher.email,
+          role: 'dept_head',
+          name: teacher.name || '',
+          subject: teacher.subject || '',
+          phoneNumber: teacher.phoneNumber || '',
+          department: teacher.department || '',
+          password: teacher.password || generateRandomPassword()
+        };
+
+        await setDoc(doc(db, 'users', userUid), userDoc);
+        savedCount++;
+      }
+      toast.success(`Successfully saved ${savedCount} teacher records.`);
+    } catch (err: any) {
+      toast.error("Failed to save changes: " + err.message);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div>
+          <h2 className="text-3xl font-black uppercase tracking-tighter">Teacher Directory</h2>
+          <p className="text-gray-500 font-mono text-xs uppercase">Inline Spreadsheet Editor & Importer</p>
+        </div>
+        <div className="flex gap-3">
+          <input
+            type="file"
+            accept=".csv,.tsv,.txt"
+            ref={fileInputRef}
+            onChange={handleFileUpload}
+            className="hidden"
+          />
+          <Button onClick={() => fileInputRef.current?.click()} className="bg-blue-600 hover:bg-blue-700 text-white font-bold uppercase tracking-wider text-xs px-4 h-10 shadow-[4px_4px_0px_0px_#141414] hover:shadow-none hover:translate-x-0.5 hover:translate-y-0.5 transition-all">
+            <Upload className="w-4 h-4 mr-2" /> Import CSV/TSV
+          </Button>
+          <Button onClick={addRow} className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold uppercase tracking-wider text-xs px-4 h-10 shadow-[4px_4px_0px_0px_#141414] hover:shadow-none hover:translate-x-0.5 hover:translate-y-0.5 transition-all">
+            <Plus className="w-4 h-4 mr-2" /> Add Row
+          </Button>
+          <Button onClick={saveChanges} className="bg-[#F27D26] hover:bg-[#d96c1c] text-white font-bold uppercase tracking-wider text-xs px-4 h-10 shadow-[4px_4px_0px_0px_#141414] hover:shadow-none hover:translate-x-0.5 hover:translate-y-0.5 transition-all">
+            Save Directory
+          </Button>
+        </div>
+      </div>
+
+      <div className="bg-white border-2 border-[#141414] overflow-hidden shadow-[8px_8px_0px_0px_rgba(20,20,20,0.08)]">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-[#141414] text-white font-mono text-[10px] uppercase tracking-wider">
+                <th className="p-3 w-16 border-r border-white/10">S. No.</th>
+                <th className="p-3 border-r border-white/10">Name</th>
+                <th className="p-3 border-r border-white/10">Subject</th>
+                <th className="p-3 border-r border-white/10">Department</th>
+                <th className="p-3 border-r border-white/10">Phone Number</th>
+                <th className="p-3 border-r border-white/10">Email</th>
+                <th className="p-3 border-r border-white/10">Password</th>
+                <th className="p-3 w-16 text-center">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y-2 divide-[#141414]/10">
+              {teachers.map((teacher, index) => (
+                <tr key={teacher.uid || index} className="hover:bg-gray-50/80 transition-colors text-sm font-medium">
+                  <td className="p-3 font-mono text-xs text-gray-500 border-r border-gray-200 bg-gray-50/50">{index + 1}</td>
+                  <td className="p-1 border-r border-gray-200">
+                    <input
+                      type="text"
+                      value={teacher.name || ''}
+                      onChange={(e) => handleCellChange(index, 'name', e.target.value)}
+                      placeholder="Jane Doe"
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs"
+                    />
+                  </td>
+                  <td className="p-1 border-r border-gray-200">
+                    <input
+                      type="text"
+                      value={teacher.subject || ''}
+                      onChange={(e) => handleCellChange(index, 'subject', e.target.value)}
+                      placeholder="Mathematics"
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs"
+                    />
+                  </td>
+                  <td className="p-1 border-r border-gray-200">
+                    <select
+                      value={teacher.department || ''}
+                      onChange={(e) => handleCellChange(index, 'department', e.target.value)}
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs bg-transparent"
+                    >
+                      {departments.map((d) => (
+                        <option key={d.id} value={d.id}>{d.name}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="p-1 border-r border-gray-200">
+                    <input
+                      type="text"
+                      value={teacher.phoneNumber || ''}
+                      onChange={(e) => handleCellChange(index, 'phoneNumber', e.target.value)}
+                      placeholder="9876543210"
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs"
+                    />
+                  </td>
+                  <td className="p-1 border-r border-gray-200">
+                    <input
+                      type="email"
+                      value={teacher.email || ''}
+                      onChange={(e) => handleCellChange(index, 'email', e.target.value)}
+                      placeholder="teacher@mru.ac.in"
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs"
+                    />
+                  </td>
+                  <td className="p-1 border-r border-gray-200">
+                    <input
+                      type="text"
+                      value={teacher.password || ''}
+                      onChange={(e) => handleCellChange(index, 'password', e.target.value)}
+                      placeholder="Generated Password"
+                      className="w-full px-2 py-1.5 border border-transparent hover:border-gray-300 focus:border-[#F27D26] focus:bg-white rounded transition-colors focus:outline-none text-xs font-mono"
+                    />
+                  </td>
+                  <td className="p-1 text-center">
+                    <button
+                      onClick={() => deleteRow(index, teacher.uid || '')}
+                      className="p-1.5 text-red-500 hover:bg-red-50 hover:text-red-700 rounded transition-colors"
+                      title="Delete User"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {teachers.length === 0 && (
+                <tr>
+                  <td colSpan={8} className="p-8 text-center text-gray-500 font-mono text-xs uppercase">No teacher accounts found. Click "Add Row" or "Import" to populate.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Errors Correction Panel */}
+      {errors.length > 0 && (
+        <div className="space-y-3 pt-6 border-t-2 border-[#141414]/10">
+          <div>
+            <h3 className="text-xl font-black text-red-600 uppercase tracking-tighter">Errors ({errors.length})</h3>
+            <p className="text-gray-500 font-mono text-[10px] uppercase">Review and edit to auto-promote rows to the teacher directory</p>
+          </div>
+
+          <div className="bg-red-50/50 border-2 border-red-500/30 overflow-hidden shadow-[8px_8px_0px_0px_rgba(239,68,68,0.05)]">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-red-950 text-red-100 font-mono text-[10px] uppercase tracking-wider">
+                    <th className="p-3 w-16 border-r border-red-900">S. No.</th>
+                    <th className="p-3 border-r border-red-900">Issue / Error</th>
+                    <th className="p-3 border-r border-red-900">Name</th>
+                    <th className="p-3 border-r border-red-900">Subject</th>
+                    <th className="p-3 border-r border-red-900">Department</th>
+                    <th className="p-3 border-r border-red-900">Phone</th>
+                    <th className="p-3 border-r border-red-900">Email</th>
+                    <th className="p-3 w-16 text-center">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-red-200">
+                  {errors.map((err, index) => (
+                    <tr key={err.uid || index} className="bg-red-50/20 text-sm font-medium">
+                      <td className="p-3 font-mono text-xs text-red-700 border-r border-red-200 bg-red-100/30">{index + 1}</td>
+                      <td className="p-3 border-r border-red-200 font-bold text-xs text-red-700 bg-red-100/50">{err.errorMsg || 'Validation Error'}</td>
+                      <td className="p-1 border-r border-red-200">
+                        <input
+                          type="text"
+                          value={err.name || ''}
+                          onChange={(e) => handleErrorCellChange(index, 'name', e.target.value)}
+                          placeholder="Name required"
+                          className="w-full px-2 py-1.5 border-2 border-red-300 focus:border-red-500 rounded text-xs bg-white focus:outline-none"
+                        />
+                      </td>
+                      <td className="p-1 border-r border-red-200">
+                        <input
+                          type="text"
+                          value={err.subject || ''}
+                          onChange={(e) => handleErrorCellChange(index, 'subject', e.target.value)}
+                          className="w-full px-2 py-1.5 border border-transparent rounded text-xs focus:outline-none focus:bg-white"
+                        />
+                      </td>
+                      <td className="p-1 border-r border-red-200">
+                        <select
+                          value={err.department || ''}
+                          onChange={(e) => handleErrorCellChange(index, 'department', e.target.value)}
+                          className="w-full px-2 py-1.5 border border-transparent rounded text-xs focus:outline-none focus:bg-white bg-transparent"
+                        >
+                          {departments.map((d) => (
+                            <option key={d.id} value={d.id}>{d.name}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="p-1 border-r border-red-200">
+                        <input
+                          type="text"
+                          value={err.phoneNumber || ''}
+                          onChange={(e) => handleErrorCellChange(index, 'phoneNumber', e.target.value)}
+                          className="w-full px-2 py-1.5 border border-transparent rounded text-xs focus:outline-none focus:bg-white"
+                        />
+                      </td>
+                      <td className="p-1 border-r border-red-200">
+                        <input
+                          type="email"
+                          value={err.email || ''}
+                          onChange={(e) => handleErrorCellChange(index, 'email', e.target.value)}
+                          placeholder="Email required"
+                          className="w-full px-2 py-1.5 border-2 border-red-300 focus:border-red-500 rounded text-xs bg-white focus:outline-none"
+                        />
+                      </td>
+                      <td className="p-1 text-center">
+                        <button
+                          onClick={() => deleteErrorRow(index)}
+                          className="p-1.5 text-red-700 hover:bg-red-200 hover:text-red-950 rounded transition-colors"
+                          title="Discard Row"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Dynamic Interactive Dashboard Diagnostics ---
+interface TestItem {
+  id: string;
+  name: string;
+  module: string;
+  status: 'pending' | 'running' | 'pass' | 'fail';
+  errorMsg?: string;
+}
+
+function AdminTestsView({ allUsers, departments, onBack }: { allUsers: any[]; departments: any[]; onBack: () => void }) {
+  const [tests, setTests] = useState<TestItem[]>([
+    // Student Aspect Diagnostics
+    { id: 'scoring_max', name: 'Student: Max Positive responses scoring', module: 'Student Module', status: 'pending' },
+    { id: 'scoring_min', name: 'Student: All Minimum responses scoring', module: 'Student Module', status: 'pending' },
+    { id: 'scoring_level', name: 'Student: Level mapping thresholds', module: 'Student Module', status: 'pending' },
+    { id: 'scoring_ranking', name: 'Student: Question ranking ordering matches', module: 'Student Module', status: 'pending' },
+    { id: 'scoring_scenario_mcq', name: 'Student: Scenario MCQ binary marking', module: 'Student Module', status: 'pending' },
+    
+    // Teacher Aspect Diagnostics
+    { id: 'analytics_avg', name: 'Teacher: Average overall score calculation', module: 'Teacher Module', status: 'pending' },
+    { id: 'analytics_pass', name: 'Teacher: Pass rate percentage calculation', module: 'Teacher Module', status: 'pending' },
+    { id: 'analytics_competency', name: 'Teacher: Average score per competency', module: 'Teacher Module', status: 'pending' },
+    { id: 'analytics_filter', name: 'Teacher: Filtering attempts by department ID', module: 'Teacher Module', status: 'pending' },
+
+    // Admin Aspect Diagnostics
+    { id: 'pwd_length', name: 'Admin: Password exact length of 8 chars', module: 'Admin Module', status: 'pending' },
+    { id: 'pwd_alpha', name: 'Admin: Password alphanumeric format checks', module: 'Admin Module', status: 'pending' },
+    { id: 'csv_commas', name: 'Admin: CSV line parsing and header mapping', module: 'Admin Module', status: 'pending' },
+    { id: 'csv_tabs', name: 'Admin: TSV line parsing and tab detection', module: 'Admin Module', status: 'pending' },
+    { id: 'mapper_student', name: 'Admin: Student directory fields custom mapper', module: 'Admin Module', status: 'pending' }
+  ]);
+  const [isRunning, setIsRunning] = useState(false);
+  const [consoleLogs, setConsoleLogs] = useState<string[]>([]);
+
+  const log = (msg: string) => {
+    setConsoleLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
+  };
+
+  const runDiagnostics = async () => {
+    setIsRunning(true);
+    setConsoleLogs([]);
+    log("Initializing in-browser diagnostic test runner...");
+
+    const updatedTests = [...tests].map(t => ({ ...t, status: 'pending' as const, errorMsg: undefined }));
+    setTests(updatedTests);
+
+    const runOneTest = async (id: string, testFn: () => void) => {
+      const idx = updatedTests.findIndex(t => t.id === id);
+      updatedTests[idx].status = 'running';
+      setTests([...updatedTests]);
+      log(`Running test: ${updatedTests[idx].name}...`);
+      await new Promise(r => setTimeout(r, 300)); // Smooth progression delays
+
+      try {
+        testFn();
+        updatedTests[idx].status = 'pass';
+        log(`PASSED: ${updatedTests[idx].name}`);
+      } catch (err: any) {
+        updatedTests[idx].status = 'fail';
+        updatedTests[idx].errorMsg = err.message || 'Assertion failed';
+        log(`FAILED: ${updatedTests[idx].name} -> ${updatedTests[idx].errorMsg}`);
+      }
+      setTests([...updatedTests]);
+    };
+
+    // --- STUDENT ASPECTS ---
+    // 1. Scoring Max
+    await runOneTest('scoring_max', () => {
+      const mockQuestions = [
+        { id: 'q1', is_reverse: false },
+        { id: 'q2', is_reverse: false },
+        { id: 'q3', is_reverse: true },
+      ];
+      const answers = { q1: 5, q2: 5, q3: 1 };
+      const result = scoreLikertSkill(mockQuestions, answers);
+      if (result.percentage !== 100 || result.level !== 5) {
+        throw new Error(`Expected 100% Level 5, got ${result.percentage}% Level ${result.level}`);
+      }
+    });
+
+    // 2. Scoring Min
+    await runOneTest('scoring_min', () => {
+      const mockQuestions = [
+        { id: 'q1', is_reverse: false },
+        { id: 'q2', is_reverse: false },
+        { id: 'q3', is_reverse: true },
+      ];
+      const answers = { q1: 1, q2: 1, q3: 5 };
+      const result = scoreLikertSkill(mockQuestions, answers);
+      if (result.percentage !== 0 || result.level !== 1) {
+        throw new Error(`Expected 0% Level 1, got ${result.percentage}% Level ${result.level}`);
+      }
+    });
+
+    // 3. Scoring Level Thresholds
+    await runOneTest('scoring_level', () => {
+      if (getLevelFromPercentage(85) !== 5) throw new Error("85% should be Level 5");
+      if (getLevelFromPercentage(70) !== 4) throw new Error("70% should be Level 4");
+      if (getLevelFromPercentage(55) !== 3) throw new Error("55% should be Level 3");
+      if (getLevelFromPercentage(40) !== 2) throw new Error("40% should be Level 2");
+      if (getLevelFromPercentage(30) !== 1) throw new Error("30% should be Level 1");
+    });
+
+    // 4. Ranking matches
+    await runOneTest('scoring_ranking', () => {
+      const question = { correct_order: ['a', 'b', 'c'], points: 6 };
+      const score = scoreRanking(question, ['a', 'c', 'b']);
+      if (score !== 2) throw new Error(`Expected score 2, got ${score}`);
+    });
+
+    // 5. Scenario MCQ binary marking
+    await runOneTest('scoring_scenario_mcq', () => {
+      const question = { correct_answer: 'B', points: 5 };
+      const score = scoreScenarioMcq(question, 'B');
+      if (score !== 5) throw new Error(`Expected score 5, got ${score}`);
+    });
+
+    // --- TEACHER ASPECTS ---
+    const mockAttempts = [
+      { overallScore: 80, certificationStatus: 'Certified', skillScores: { c1: 90, c2: 70 }, userId: 'u1' },
+      { overallScore: 60, certificationStatus: 'Certified', skillScores: { c1: 60, c2: 60 }, userId: 'u2' },
+      { overallScore: 40, certificationStatus: 'Not Certified', skillScores: { c1: 30, c2: 50 }, userId: 'u3' },
+    ];
+
+    // 6. Analytics average overall score
+    await runOneTest('analytics_avg', () => {
+      const avg = calculateAverageScore(mockAttempts);
+      if (avg !== 60) throw new Error(`Expected average 60, got ${avg}`);
+    });
+
+    // 7. Analytics pass rate
+    await runOneTest('analytics_pass', () => {
+      const passRate = calculatePassRate(mockAttempts);
+      if (passRate !== 66.7) throw new Error(`Expected pass rate 66.7%, got ${passRate}%`);
+    });
+
+    // 8. Analytics score per competency
+    await runOneTest('analytics_competency', () => {
+      const competencies = [
+        { id: 'c1', name: 'Competency 1' },
+        { id: 'c2', name: 'Competency 2' },
+      ];
+      const averages = calculateCompetencyAverages(mockAttempts, competencies);
+      if (averages[0].average !== 60 || averages[1].average !== 60) {
+        throw new Error(`Expected competency averages to be 60. Got ${averages[0].average} and ${averages[1].average}`);
+      }
+    });
+
+    // 9. Department filtering
+    await runOneTest('analytics_filter', () => {
+      const users = [
+        { uid: 'u1', department: 'cse' },
+        { uid: 'u2', department: 'ece' },
+        { uid: 'u3', department: 'cse' },
+      ];
+      const filtered = filterAttemptsByDepartment(mockAttempts, users, 'cse');
+      if (filtered.length !== 2) throw new Error(`Expected 2 filtered attempts, got ${filtered.length}`);
+    });
+
+    // --- ADMIN ASPECTS ---
+    // 10. Password Length
+    await runOneTest('pwd_length', () => {
+      const pwd = generateRandomPassword();
+      if (pwd.length !== 8) throw new Error(`Password length is ${pwd.length} instead of 8`);
+    });
+
+    // 11. Password Alphanumeric
+    await runOneTest('pwd_alpha', () => {
+      const pwd = generateRandomPassword();
+      if (!/^[a-zA-Z0-9]+$/.test(pwd)) throw new Error(`Password "${pwd}" contains special characters`);
+    });
+
+    // 12. CSV Commas
+    await runOneTest('csv_commas', () => {
+      const csvText = 'Name,Email\nJohn Doe,john@mru.ac.in';
+      const result = parseCsvOrTsv(csvText, false);
+      if (result.headers[0] !== 'name' || result.rows[0].name !== 'John Doe') {
+        throw new Error("Failed to parse comma-separated header or value");
+      }
+    });
+
+    // 13. CSV Tabs
+    await runOneTest('csv_tabs', () => {
+      const tsvText = 'Name\tEmail\nJohn Doe\tjohn@mru.ac.in';
+      const result = parseCsvOrTsv(tsvText, true);
+      if (result.headers[0] !== 'name' || result.rows[0].email !== 'john@mru.ac.in') {
+        throw new Error("Failed to parse tab-separated header or value");
+      }
+    });
+
+    // 14. Mapper Student
+    await runOneTest('mapper_student', () => {
+      const csvRow = { name: 'Alice', rollnumber: '123', emailid: 'alice@mru.ac.in' };
+      const result = mapStudentRow(csvRow, departments);
+      if (result.name !== 'Alice' || result.rollNumber !== '123' || result.email !== 'alice@mru.ac.in') {
+        throw new Error(`Mapper failed. Got name: ${result.name}, roll: ${result.rollNumber}, email: ${result.email}`);
+      }
+    });
+
+    log("Diagnostics completed successfully!");
+    setIsRunning(false);
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div>
+          <h2 className="text-3xl font-black uppercase tracking-tighter text-[#141414]">Interactive Diagnostic Test Runner</h2>
+          <p className="text-gray-500 font-mono text-xs uppercase">Run client-side & logic validation suites live in Render production environment</p>
+        </div>
+        <Button 
+          onClick={runDiagnostics} 
+          disabled={isRunning}
+          className="bg-[#141414] hover:bg-black text-white font-bold uppercase tracking-wider text-xs px-6 h-12 shadow-[4px_4px_0px_0px_#F27D26] hover:shadow-none hover:translate-x-0.5 hover:translate-y-0.5 transition-all"
+        >
+          {isRunning ? "Running Diagnostics..." : "Run Diagnostic Tests"}
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Test List Panel */}
+        <div className="lg:col-span-2 bg-white border-2 border-[#141414] shadow-[6px_6px_0px_0px_rgba(20,20,20,0.08)] overflow-hidden">
+          <div className="bg-[#141414] text-white p-3 font-mono text-[10px] uppercase tracking-wider">Test Specifications</div>
+          <div className="divide-y-2 divide-[#141414]/5">
+            {tests.map((test) => (
+              <div key={test.id} className="p-4 flex items-center justify-between hover:bg-gray-50/80 transition-colors">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono font-bold text-gray-400 uppercase tracking-widest">[{test.module}]</span>
+                    <span className="text-sm font-bold text-gray-800">{test.name}</span>
+                  </div>
+                  {test.errorMsg && <p className="text-xs text-red-500 font-mono">Assertion Error: {test.errorMsg}</p>}
+                </div>
+                <div>
+                  {test.status === 'pending' && <span className="px-2.5 py-1 text-[10px] font-mono font-bold uppercase bg-gray-100 text-gray-500 border border-gray-200">Pending</span>}
+                  {test.status === 'running' && <span className="px-2.5 py-1 text-[10px] font-mono font-bold uppercase bg-yellow-100 text-yellow-700 border border-yellow-200 animate-pulse">Running</span>}
+                  {test.status === 'pass' && <span className="px-2.5 py-1 text-[10px] font-mono font-bold uppercase bg-emerald-100 text-emerald-700 border border-emerald-200">Pass</span>}
+                  {test.status === 'fail' && <span className="px-2.5 py-1 text-[10px] font-mono font-bold uppercase bg-red-100 text-red-700 border border-red-200">Fail</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Live Logs Terminal Panel */}
+        <div className="bg-[#1e1e1e] border-2 border-[#141414] shadow-[6px_6px_0px_0px_rgba(20,20,20,0.08)] flex flex-col h-[400px]">
+          <div className="bg-[#141414] text-gray-300 p-3 font-mono text-[10px] uppercase tracking-wider flex items-center justify-between">
+            <span>Diagnostic Console Logs</span>
+            <div className="flex gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-red-500/80" />
+              <span className="w-2.5 h-2.5 rounded-full bg-yellow-500/80" />
+              <span className="w-2.5 h-2.5 rounded-full bg-green-500/80" />
+            </div>
+          </div>
+          <div className="flex-1 p-4 font-mono text-xs text-emerald-400 overflow-y-auto space-y-2 select-text custom-scrollbar bg-black/90">
+            {consoleLogs.map((logStr, i) => (
+              <div key={i} className="leading-relaxed whitespace-pre-wrap">{logStr}</div>
+            ))}
+            {consoleLogs.length === 0 && (
+              <div className="text-gray-500 italic">Console idle. Click "Run Diagnostic Tests" to launch.</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+

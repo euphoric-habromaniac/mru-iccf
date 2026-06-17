@@ -72,3 +72,113 @@ export const generateCertificate = (studentName: string, assessmentName: string,
   // Download
   doc.save(`${studentName.replace(/[^a-zA-Z0-9]/g, '_')}_${assessmentName.replace(/[^a-zA-Z0-9]/g, '_')}_Certificate.pdf`);
 };
+
+export const generateRandomPassword = () => {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let pwd = '';
+  for (let i = 0; i < 8; i++) {
+    pwd += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return pwd;
+};
+
+export const parseCsvOrTsv = (text: string, isTsv: boolean) => {
+  const lines = text.split(/\r?\n/);
+  if (lines.length === 0 || !lines[0]) return { headers: [], rows: [] };
+  
+  const splitLine = (line: string) => {
+    if (isTsv) return line.split('\t');
+    
+    // Split CSV supporting double-quoted fields
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === ',' && !inQuotes) {
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  };
+
+  const headers = splitLine(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  const rows: Record<string, string>[] = [];
+  
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    const values = splitLine(lines[i]);
+    const rowObj: Record<string, string> = {};
+    headers.forEach((header, index) => {
+      rowObj[header] = values[index] || '';
+    });
+    rows.push(rowObj);
+  }
+  
+  return { headers, rows };
+};
+
+export const mapStudentRow = (row: Record<string, string>, departments: any[]) => {
+  const nameKeys = ['name', 'fullname', 'studentname', 'username'];
+  const rollKeys = ['rollnumber', 'rollno', 'roll', 'id', 'studentid'];
+  const classKeys = ['class', 'section', 'semester', 'sem', 'year'];
+  const majorKeys = ['major', 'course', 'branch', 'specialization'];
+  const deptKeys = ['department', 'dept'];
+  const phoneKeys = ['phonenumber', 'phone', 'mobile', 'contact', 'tel'];
+  const emailKeys = ['email', 'emailid', 'address', 'mail'];
+  const pwdKeys = ['password', 'pass', 'pwd'];
+
+  const getVal = (keys: string[]) => {
+    const key = keys.find(k => k in row);
+    return key ? row[key] : '';
+  };
+
+  const deptInput = getVal(deptKeys).toLowerCase();
+  const deptMatch = departments.find(d => d.name.toLowerCase() === deptInput || d.id.toLowerCase() === deptInput);
+  const deptId = deptMatch ? deptMatch.id : (departments[0]?.id || 'CSE');
+
+  return {
+    name: getVal(nameKeys),
+    rollNumber: getVal(rollKeys),
+    class: getVal(classKeys),
+    major: getVal(majorKeys),
+    department: deptId,
+    phoneNumber: getVal(phoneKeys),
+    email: getVal(emailKeys),
+    password: getVal(pwdKeys) || generateRandomPassword()
+  };
+};
+
+export const mapTeacherRow = (row: Record<string, string>, departments: any[]) => {
+  const nameKeys = ['name', 'fullname', 'teachername', 'facultyname', 'username'];
+  const subjectKeys = ['subject', 'course', 'class', 'paper', 'specialization'];
+  const deptKeys = ['department', 'dept'];
+  const phoneKeys = ['phonenumber', 'phone', 'mobile', 'contact', 'tel'];
+  const emailKeys = ['email', 'emailid', 'address', 'mail'];
+  const pwdKeys = ['password', 'pass', 'pwd'];
+
+  const getVal = (keys: string[]) => {
+    const key = keys.find(k => k in row);
+    return key ? row[key] : '';
+  };
+
+  const deptInput = getVal(deptKeys).toLowerCase();
+  const deptMatch = departments.find(d => d.name.toLowerCase() === deptInput || d.id.toLowerCase() === deptInput);
+  const deptId = deptMatch ? deptMatch.id : (departments[0]?.id || 'CSE');
+
+  return {
+    name: getVal(nameKeys),
+    subject: getVal(subjectKeys),
+    department: deptId,
+    phoneNumber: getVal(phoneKeys),
+    email: getVal(emailKeys),
+    password: getVal(pwdKeys) || generateRandomPassword()
+  };
+};
+

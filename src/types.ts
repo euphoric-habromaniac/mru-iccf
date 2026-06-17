@@ -7,6 +7,13 @@ export interface User {
   department?: string;
   year?: number;
   name?: string;
+  rollNumber?: string;
+  class?: string;
+  major?: string;
+  phoneNumber?: string;
+  subject?: string;
+  password?: string;
+  mustResetPassword?: boolean;
 }
 
 export interface Department {
