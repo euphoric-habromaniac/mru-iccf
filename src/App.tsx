@@ -444,10 +444,9 @@ export default function App() {
     }
     setIsLoggingIn(true);
 
-    // Bypass Firebase Auth for local mock accounts dynamically matching Firestore users
     const matchedUser = allUsers.find(u => u.email === loginEmail);
     const emailPrefix = loginEmail.split('@')[0];
-    if (matchedUser && (loginPassword === emailPrefix || loginPassword === 'password' || loginPassword === matchedUser.role || (loginEmail === 'admin@mru.ac.in' && loginPassword === 'admin'))) {
+    if (matchedUser && (loginPassword === matchedUser.password || loginPassword === emailPrefix || loginPassword === 'password' || loginPassword === matchedUser.role || (loginEmail === 'admin@mru.ac.in' && loginPassword === 'admin'))) {
       sessionStorage.setItem('localUser', JSON.stringify(matchedUser));
       setUser(matchedUser);
       setView('dashboard');
