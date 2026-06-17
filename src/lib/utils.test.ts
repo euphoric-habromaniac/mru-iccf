@@ -54,4 +54,13 @@ describe('Utility Unit Tests', () => {
       expect(result.password).toHaveLength(8);
     });
   });
+
+  describe('PDF Report Exports presence', () => {
+    it('defines generateStudentScorecardPDF, generateAssessmentReportPDF, generateDepartmentReportPDF', async () => {
+      const utils = await import('./utils');
+      expect(utils.generateStudentScorecardPDF).toBeDefined();
+      expect(utils.generateAssessmentReportPDF).toBeDefined();
+      expect(utils.generateDepartmentReportPDF).toBeDefined();
+    });
+  });
 });

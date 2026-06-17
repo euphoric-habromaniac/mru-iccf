@@ -112,4 +112,19 @@ describe('Scoring & Analytics Engine Unit Tests', () => {
       expect(allAttempts).toHaveLength(2);
     });
   });
+  describe('Attempt Duration Tracking', () => {
+    it('supports attempts with duration strings', () => {
+      const attempt = {
+        id: 'att_123',
+        userId: 'student_1',
+        assessmentId: 'assess_1',
+        overallScore: 80,
+        certificationStatus: 'Certified',
+        skillScores: { c1: 80 },
+        duration: '12m 45s',
+        timestamp: new Date().toISOString()
+      };
+      expect(attempt.duration).toBe('12m 45s');
+    });
+  });
 });

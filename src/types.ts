@@ -130,6 +130,7 @@ export interface Attempt {
   skill_percentage?: number;
   level?: number;
   level_descriptor?: string;
+  duration?: string;
 }
 
 export interface Certification {

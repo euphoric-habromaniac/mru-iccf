@@ -8,7 +8,7 @@ import { LogIn, LogOut, Shield, GraduationCap, Building2, LayoutDashboard, Clipb
 import { motion, AnimatePresence } from 'motion/react';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip, LineChart, Line, XAxis, YAxis, CartesianGrid, BarChart, Bar } from 'recharts';
 import { jsPDF } from 'jspdf';
-import { cn, generateCertificate, generateRandomPassword, parseCsvOrTsv, mapStudentRow, mapTeacherRow } from './lib/utils';
+import { cn, generateCertificate, generateRandomPassword, parseCsvOrTsv, mapStudentRow, mapTeacherRow, generateStudentScorecardPDF, generateAssessmentReportPDF, generateDepartmentReportPDF } from './lib/utils';
 import { HUMAN_CENTRIC_LIKERT_SKILLS, LIKERT_LEVEL_LABELS, LIKERT_SCALE_OPTIONS } from './lib/likertBank';
 import { getLevelFromPercentage, scoreLikertAssessment, scoreLikertSkill, scoreScenarioMcq, scoreRanking, calculateAverageScore, calculatePassRate, calculateCompetencyAverages, filterAttemptsByDepartment } from './lib/scoring';
 import { gradeTextAnswer } from './lib/aiService';
@@ -738,7 +738,7 @@ export default function App() {
               active={view === 'admin'} 
               onClick={() => { setView('admin'); if (window.innerWidth < 1024) setIsSidebarOpen(false); }} 
               icon={<Settings className="w-5 h-5" />} 
-              label="Management" 
+              label="Examination" 
               collapsed={!isSidebarOpen} 
             />
           )}
@@ -876,6 +876,7 @@ export default function App() {
 
             {view === 'studentResults' && (user?.role === 'teacher' || user?.role === 'dept_head' || user?.role === 'core_team') && (
               <StudentResultsView
+                user={user}
                 attempts={attempts}
                 allUsers={allUsers}
                 departments={departments}
@@ -1745,11 +1746,7 @@ function AdminOverview({ assessments, attempts, competencies }: { assessments: A
           </div>
           <div className="flex items-center justify-between">
             <span className="text-sm font-bold uppercase">IP Integrity</span>
-            <Badge variant="success">99.8%</Badge>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-bold uppercase">Question Quality</span>
-            <Badge variant="warning">Review Req.</Badge>
+            <Badge variant="success">100% Secure</Badge>
           </div>
         </div>
       </Card>
@@ -2039,11 +2036,17 @@ function AssessmentView({ assessment, competencies, onComplete, onCancel, user }
 
     logger.assessment('Attempt Submitted', 'info', { overallScore, status: certificationStatus });
 
+    const startObj = new Date(Date.now() - (assessment.timeLimit || 30) * 60 * 1000 + timeLeft * 1000);
+    const durationMs = new Date().getTime() - startObj.getTime();
+    const minutes = Math.floor(durationMs / 60000);
+    const seconds = Math.floor((durationMs % 60000) / 1000);
+    const durationStr = `${minutes}m ${seconds}s`;
+
     const attempt: Attempt = {
       id: `att_${Date.now()}`,
       userId: user.uid,
       assessmentId: assessment.id,
-      startTime: new Date(Date.now() - (assessment.timeLimit || 30) * 60 * 1000 + timeLeft * 1000).toISOString(),
+      startTime: startObj.toISOString(),
       endTime: new Date().toISOString(),
       ipAddress: '192.168.1.1',
       deviceMetadata: navigator.userAgent,
@@ -2052,6 +2055,7 @@ function AssessmentView({ assessment, competencies, onComplete, onCancel, user }
       overallScore,
       certificationStatus,
       timestamp: new Date(getRealTime()).toISOString(),
+      duration: durationStr,
       
       // Exact strict payload requirements
       student_id: user.uid,
@@ -2540,6 +2544,7 @@ function HistoryView({ attempts, assessments, competencies, onBack, onViewScorec
 // --- Student Results View ---
 
 function StudentResultsView({
+  user,
   attempts,
   allUsers,
   departments,
@@ -2548,6 +2553,7 @@ function StudentResultsView({
   onViewScorecard,
   onBack
 }: {
+  user: User;
   attempts: Attempt[];
   allUsers: User[];
   departments: any[];
@@ -2563,34 +2569,68 @@ function StudentResultsView({
 
   const handleExportTranscript = (att: Attempt) => {
     const assessment = assessments.find(a => a.id === att.assessmentId);
-    const transcriptData = {
-      institution: "Manav Rachna Institutional Competency Certification Framework",
-      studentId: att.userId,
-      assessmentName: assessment?.name,
-      date: new Date(att.timestamp).toLocaleString(),
-      overallScore: att.overallScore,
-      competencies: Object.entries(att.skillScores)
-        .filter(([id]) => competencies.find(c => c.id === id))
-        .map(([id, score]) => ({
-        name: competencies.find(c => c.id === id)?.name,
+    const profile = allUsers.find(u => u.uid === att.userId);
+    const studentName = profile?.name || att.userId;
+    const studentEmail = profile?.email || 'N/A';
+    
+    const mappedCompetencies = Object.entries(att.skillScores)
+      .filter(([id]) => competencies.find(c => c.id === id))
+      .map(([id, score]) => ({
+        name: competencies.find(c => c.id === id)?.name || id,
         score: getSkillPercentageValue(score),
-        raw: getSkillRawValue(score),
         level: getSkillLevelValue(score),
-        levelLabel: getSkillLevelLabel(score),
-      })),
-      compositeScore: att.compositeScore || att.composite_score || null,
-      certificationStatus: att.certificationStatus
-    };
+        label: getSkillLevelLabel(score)
+      }));
 
-    const blob = new Blob([JSON.stringify(transcriptData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    const sanitizedName = (assessment?.name || 'assessment').replace(/[^a-zA-Z0-9]/g, '_');
-    a.download = `${att.userId}_${sanitizedName}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.success('Transcript exported successfully');
+    generateStudentScorecardPDF(
+      studentName,
+      studentEmail,
+      assessment?.name || 'Competency Assessment',
+      new Date(att.timestamp).toLocaleString(),
+      Math.round(att.overallScore),
+      (att as any).duration || '',
+      mappedCompetencies
+    );
+    toast.success('Transcript exported as PDF successfully.');
+  };
+
+  const handleEditResult = async (att: Attempt, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const newScoreStr = window.prompt("Enter new score (0-100):", String(Math.round(att.overallScore)));
+    if (newScoreStr === null) return;
+    const newScore = parseFloat(newScoreStr);
+    if (isNaN(newScore) || newScore < 0 || newScore > 100) {
+      toast.error("Invalid score entered. Must be a number between 0 and 100.");
+      return;
+    }
+
+    const defaultStatus = newScore >= (assessments.find(a => a.id === att.assessmentId)?.minScore || 60) ? 'certified' : 'failed';
+    const newStatus = window.prompt("Enter new certification status (certified / failed):", defaultStatus);
+    if (newStatus === null) return;
+    const sanitizedStatus = newStatus.trim().toLowerCase();
+
+    try {
+      await setDoc(doc(db, 'attempts', att.id), {
+        overallScore: newScore,
+        certificationStatus: sanitizedStatus
+      }, { merge: true });
+      toast.success("Student attempt result updated successfully.");
+    } catch (err: any) {
+      toast.error("Failed to update result: " + err.message);
+    }
+  };
+
+  const handleDeleteResult = async (att: Attempt, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (window.confirm("ARE YOU SURE YOU WANNA DELETE THIS STUDENT RESULT?")) {
+      try {
+        const { deleteDoc } = await import('firebase/firestore');
+        await deleteDoc(doc(db, 'attempts', att.id));
+        toast.success("Student attempt result deleted.");
+      } catch (err: any) {
+        toast.error("Failed to delete result: " + err.message);
+      }
+    }
   };
 
   // Process & filter attempts
@@ -2699,9 +2739,41 @@ function StudentResultsView({
               {selectedDept === 'all' ? 'All Departments' : departments.find(d => d.id === selectedDept)?.name || 'Department'} Performance
             </p>
           </div>
-          <Button variant="outline" onClick={() => setViewMode('assessments')} className="text-xs uppercase tracking-widest font-bold">
-            <ChevronLeft className="w-4 h-4 mr-2" /> Back to Assessments
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => {
+              const deptName = selectedDept === 'all' ? 'All Departments' : departments.find(d => d.id === selectedDept)?.name || 'Department';
+              const activeAssessments = assessments.filter(a => selectedDept === 'all' || a.departmentId === selectedDept);
+              const list = activeAssessments.map(a => {
+                const atts = attempts.filter(att => att.assessmentId === a.id);
+                const avgScore = atts.length > 0 ? Math.round(atts.reduce((acc, curr) => acc + curr.overallScore, 0) / atts.length) : 0;
+                const certified = atts.filter(att => att.certificationStatus === 'certified').length;
+                const passRateVal = atts.length > 0 ? Math.round((certified / atts.length) * 100) : 0;
+                return {
+                  name: a.name,
+                  attempts: atts.length,
+                  passRate: passRateVal,
+                  avgScore
+                };
+              });
+
+              generateDepartmentReportPDF(
+                deptName,
+                {
+                  assessmentsCount: activeAssessments.length,
+                  studentsCount: filteredAttempts.length,
+                  avgScore: filteredAttempts.length > 0 ? Math.round(filteredAttempts.reduce((acc, curr) => acc + curr.overallScore, 0) / filteredAttempts.length) : 0,
+                  passRate: filteredAttempts.length > 0 ? Math.round((filteredAttempts.filter(a => a.certificationStatus === 'certified').length / filteredAttempts.length) * 100) : 0
+                },
+                list
+              );
+              toast.success('Department report exported as PDF.');
+            }} className="text-xs uppercase tracking-widest font-bold">
+              Export Report (PDF)
+            </Button>
+            <Button variant="outline" onClick={() => setViewMode('assessments')} className="text-xs uppercase tracking-widest font-bold">
+              <ChevronLeft className="w-4 h-4 mr-2" /> Back to Assessments
+            </Button>
+          </div>
         </div>
 
         <Card className="bg-white border-2 border-[#141414] shadow-[4px_4px_0px_0px_#141414] p-4 lg:p-6 mb-6">
@@ -2782,9 +2854,46 @@ function StudentResultsView({
             Viewing Attempts for: {assessments.find(a => a.id === selectedAssessmentId)?.name || 'All Assessments'}
           </p>
         </div>
-        <Button variant="outline" onClick={() => setViewMode('assessments')} className="text-xs uppercase tracking-widest font-bold">
-          <ChevronLeft className="w-4 h-4" /> Back to Assessments
-        </Button>
+        <div className="flex gap-2">
+          {selectedAssessmentId !== 'all' && (
+            <Button variant="outline" onClick={() => {
+              const assessment = assessments.find(a => a.id === selectedAssessmentId);
+              if (!assessment) return;
+              const deptName = departments.find(d => d.id === assessment.departmentId)?.name || 'Common';
+              const avgScore = filteredAttempts.length > 0 ? Math.round(filteredAttempts.reduce((acc, curr) => acc + curr.overallScore, 0) / filteredAttempts.length) : 0;
+              const certified = filteredAttempts.filter(att => att.certificationStatus === 'certified').length;
+              const passRateVal = filteredAttempts.length > 0 ? Math.round((certified / filteredAttempts.length) * 100) : 0;
+              
+              const attemptsList = filteredAttempts.map(att => {
+                const profile = allUsers.find(u => u.uid === att.userId);
+                return {
+                  studentName: profile?.name || att.userId,
+                  studentEmail: profile?.email || 'N/A',
+                  score: Math.round(att.overallScore),
+                  level: att.level || 1,
+                  status: att.certificationStatus || 'failed',
+                  date: new Date(att.timestamp).toLocaleDateString()
+                };
+              });
+
+              generateAssessmentReportPDF(
+                assessment.name,
+                deptName,
+                assessment.minScore || 60,
+                filteredAttempts.length,
+                passRateVal,
+                avgScore,
+                attemptsList
+              );
+              toast.success('Assessment report exported as PDF.');
+            }} className="text-xs uppercase tracking-widest font-bold">
+              Export Report (PDF)
+            </Button>
+          )}
+          <Button variant="outline" onClick={() => setViewMode('assessments')} className="text-xs uppercase tracking-widest font-bold">
+            <ChevronLeft className="w-4 h-4" /> Back to Assessments
+          </Button>
+        </div>
       </div>
 
       {/* Stats Summary Panel */}
@@ -2878,6 +2987,7 @@ function StudentResultsView({
                 <th className="p-3 sm:p-4 whitespace-nowrap text-right">%</th>
                 <th className="p-3 sm:p-4 whitespace-nowrap text-center">Level</th>
                 <th className="p-3 sm:p-4 whitespace-nowrap text-center">Status</th>
+                {user?.role === 'core_team' && <th className="p-3 sm:p-4 text-center whitespace-nowrap">Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -2909,6 +3019,14 @@ function StudentResultsView({
                         {att.certificationStatus}
                       </Badge>
                     </td>
+                    {user?.role === 'core_team' && (
+                      <td className="p-2 sm:p-3 text-center whitespace-nowrap">
+                        <div className="flex gap-1.5 justify-center" onClick={(e) => e.stopPropagation()}>
+                          <Button variant="outline" className="text-[10px] h-7 px-2 py-0" onClick={(e) => handleEditResult(att, e)}>Edit</Button>
+                          <Button variant="danger" className="text-[10px] h-7 px-2 py-0" onClick={(e) => handleDeleteResult(att, e)}>Delete</Button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 );
               })}
@@ -3190,7 +3308,26 @@ function ScorecardView({
             <Button variant="outline" className="flex-1" onClick={onBack}>
               Back
             </Button>
-            <Button className="flex-1" onClick={() => handleExportTranscript(attempt)}>
+            <Button className="flex-1" onClick={() => {
+              const mappedCompetencies = Object.entries(attempt.skillScores)
+                .filter(([id]) => competencies.find(c => c.id === id))
+                .map(([id, score]) => ({
+                  name: competencies.find(c => c.id === id)?.name || id,
+                  score: getSkillPercentageValue(score),
+                  level: getSkillLevelValue(score),
+                  label: getSkillLevelLabel(score)
+                }));
+              generateStudentScorecardPDF(
+                studentName,
+                studentEmail,
+                assessment?.name || 'Competency Assessment',
+                new Date(attempt.timestamp).toLocaleString(),
+                Math.round(attempt.overallScore),
+                attempt.duration || '',
+                mappedCompetencies
+              );
+              toast.success('Transcript exported as PDF successfully.');
+            }}>
               Export Scorecard
             </Button>
           </div>
@@ -3379,6 +3516,25 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
     }
   };
 
+  const handleRenameCompetency = async (id: string, newName: string) => {
+    try {
+      await setDoc(doc(db, 'competencies', id), { name: newName }, { merge: true });
+      toast.success('Competency renamed');
+    } catch (e: any) {
+      handleFirestoreError(e, 'rename_comp', 'competencies');
+    }
+  };
+
+  const handleDeleteCompetency = async (id: string) => {
+    try {
+      const { deleteDoc } = await import('firebase/firestore');
+      await deleteDoc(doc(db, 'competencies', id));
+      toast.success('Competency deleted');
+    } catch (e: any) {
+      handleFirestoreError(e, 'delete_comp', 'competencies');
+    }
+  };
+
   const handleSaveAssessment = async () => {
     if (!assessmentForm.name.trim() || !assessmentForm.departmentId) return;
     try {
@@ -3447,6 +3603,18 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
     setAssessmentModalTab('settings');
     setShowQuestionSelector(false);
     setShowAssessmentModal(true);
+  };
+
+  const handleDeleteAssessment = async (id: string) => {
+    if (window.confirm("Are you sure you want to delete this assessment?")) {
+      try {
+        const { deleteDoc } = await import('firebase/firestore');
+        await deleteDoc(doc(db, 'assessments', id));
+        toast.success('Assessment deleted successfully.');
+      } catch (e: any) {
+        handleFirestoreError(e, 'delete_assessment', 'assessments');
+      }
+    }
   };
 
   const viewQuestions = async (a: Assessment) => {
@@ -3545,7 +3713,7 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
         question_text: newQuestionText.trim(),
         difficulty: 'medium',
         createdBy: user.uid,
-        approvalStatus: 'pending',
+        approvalStatus: 'approved',
       };
 
       if (newQuestionType === 'likert') {
@@ -3607,7 +3775,6 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
           <p className="text-gray-500 font-mono text-xs lg:text-sm uppercase">Governance & Question Bank Control</p>
         </div>
         <div className="flex flex-wrap gap-2 lg:gap-4 w-full sm:w-auto">
-          <Button variant="outline" className="flex-1 sm:flex-none text-[10px] sm:text-xs px-2" onClick={() => (window as any).handleSeedData?.()}><Plus className="w-3 h-3 sm:w-4 sm:h-4" /> Seed Data</Button>
           <Button variant="outline" onClick={onBack} className="flex-1 sm:flex-none text-[10px] sm:text-xs px-2 uppercase tracking-widest font-bold">
             <ChevronLeft className="w-4 h-4" /> Back
           </Button>
@@ -3616,7 +3783,7 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
 
       <div className="flex border-b border-[#141414] overflow-x-auto no-scrollbar">
         {[
-          { id: 'departments', label: 'Departments', icon: <Building2 className="w-4 h-4" /> },
+          { id: 'departments', label: 'Department', icon: <Building2 className="w-4 h-4" /> },
           { id: 'competencies', label: 'Competencies', icon: <BookOpen className="w-4 h-4" /> },
           { id: 'assessments', label: 'Assessments', icon: <ClipboardList className="w-4 h-4" /> },
           { id: 'question_bank', label: 'Question Bank', icon: <Database className="w-4 h-4" />, count: pendingQuestions.length },
@@ -3657,20 +3824,20 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
                     <p className="text-[10px] text-gray-500 font-mono">ID: {d.id}</p>
                   </div>
                   <div className="flex gap-2">
-                    <Button variant="ghost" className="p-2 h-auto" onClick={() => {
-                      const action = window.prompt("Type 'rename' to rename this department, or 'delete' to delete it:");
-                      if (action === 'rename') {
-                        const newName = window.prompt("Enter new name for " + d.name, d.name);
-                        if (newName && newName.trim()) {
-                          handleRenameDepartment(d.id, newName.trim());
-                        }
-                      } else if (action === 'delete') {
-                        if (window.confirm("Are you sure you want to delete this department?")) {
-                          handleDeleteDepartment(d.id);
-                        }
+                    <Button variant="outline" className="text-xs px-3 h-8" onClick={() => {
+                      const newName = window.prompt("Enter new name for department " + d.name + ":", d.name);
+                      if (newName && newName.trim()) {
+                        handleRenameDepartment(d.id, newName.trim());
                       }
                     }}>
-                      <Settings className="w-4 h-4" />
+                      Rename
+                    </Button>
+                    <Button variant="danger" className="text-xs px-3 h-8" onClick={() => {
+                      if (window.confirm("ARE YOU SURE YOU WANNA DELETE IT?")) {
+                        handleDeleteDepartment(d.id);
+                      }
+                    }}>
+                      Delete
                     </Button>
                   </div>
                 </div>
@@ -3698,8 +3865,21 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
                     </p>
                   </div>
                   <div className="flex gap-1 lg:gap-2">
-                    <Button variant="ghost" className="p-2 h-auto"><Settings className="w-4 h-4" /></Button>
-                    <Button variant="ghost" className="p-2 h-auto text-red-500"><Trash2 className="w-4 h-4" /></Button>
+                    <Button variant="ghost" className="p-2 h-auto" title="Rename Competency" onClick={() => {
+                      const newName = window.prompt("Enter new name for competency " + c.name + ":", c.name);
+                      if (newName && newName.trim()) {
+                        handleRenameCompetency(c.id, newName.trim());
+                      }
+                    }}>
+                      <Settings className="w-4 h-4" />
+                    </Button>
+                    <Button variant="ghost" className="p-2 h-auto text-red-500" title="Delete Competency" onClick={() => {
+                      if (window.confirm("ARE YOU SURE YOU WANNA DELETE IT?")) {
+                        handleDeleteCompetency(c.id);
+                      }
+                    }}>
+                      <Trash2 className="w-4 h-4" />
+                    </Button>
                   </div>
                 </div>
               ))}
@@ -3734,6 +3914,7 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
                   <div className="flex gap-2">
                     <Button variant="outline" className="flex-1 text-[10px] h-8" onClick={() => openEditAssessment(a)}>Edit</Button>
                     <Button variant="outline" className="flex-1 text-[10px] h-8" onClick={() => viewQuestions(a)}>Questions</Button>
+                    <Button variant="danger" className="text-[10px] h-8 px-3" onClick={() => handleDeleteAssessment(a.id)}>Delete</Button>
                   </div>
                 </div>
               ))}
@@ -3774,12 +3955,6 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <select className="border border-gray-300 px-3 py-2 text-sm max-w-[140px]" value={questionFilterStatus} onChange={(e) => setQuestionFilterStatus(e.target.value)}>
-                    <option value="all">All Statuses</option>
-                    <option value="approved">Approved</option>
-                    <option value="pending">Pending</option>
-                    <option value="rejected">Rejected</option>
-                  </select>
                   <select className="border border-gray-300 px-3 py-2 text-sm max-w-[120px]" value={questionFilterType} onChange={(e) => setQuestionFilterType(e.target.value)}>
                     <option value="all">All Types</option>
                     <option value="mcq">MCQ</option>
@@ -3801,9 +3976,6 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
                   {filteredQuestions.map(q => (
                     <div key={q.id} className="p-4 border border-gray-100 space-y-4">
                       <div className="flex justify-between items-start">
-                        <Badge variant={q.approvalStatus === 'approved' ? 'success' : q.approvalStatus === 'rejected' ? 'danger' : 'warning'}>
-                          {q.approvalStatus === 'approved' ? 'Approved' : q.approvalStatus === 'rejected' ? 'Rejected' : 'Pending Review'}
-                        </Badge>
                         <span className="text-[10px] font-mono text-gray-400">ID: {q.id}</span>
                       </div>
                       <p className="font-bold text-sm">{getQuestionText(q)}</p>
@@ -3829,12 +4001,6 @@ function AdminManagement({ user, competencies, assessments, departments, onBack 
                       
                       <div className="flex justify-end gap-2 pt-2 border-t border-gray-50 mt-4">
                         <Button variant="outline" className="text-xs" onClick={() => openEditQuestion(q)}>Edit</Button>
-                        {q.approvalStatus === 'pending' && (
-                          <>
-                            <Button variant="ghost" className="text-red-500 text-xs" onClick={() => handleRejectQuestion(q.id)}>Reject</Button>
-                            <Button variant="primary" className="text-xs" onClick={() => handleApproveQuestion(q.id)}>Approve</Button>
-                          </>
-                        )}
                       </div>
                     </div>
                   ))}
@@ -4417,13 +4583,67 @@ function AdminStudentsView({ allUsers, departments, onBack }: { allUsers: User[]
 
   const saveChanges = async () => {
     try {
-      let savedCount = 0;
+      const emails = new Set<string>();
+      const rolls = new Set<string>();
+      const phones = new Set<string>();
+
       for (const student of students) {
-        if (!student.email) {
+        const email = (student.email || '').trim().toLowerCase();
+        const roll = (student.rollNumber || '').trim().toLowerCase();
+        const phone = (student.phoneNumber || '').trim();
+
+        if (!email) {
           toast.error("All rows must have an email address.");
           return;
         }
 
+        if (emails.has(email)) {
+          toast.error(`Duplicate email in list: ${student.email}`);
+          return;
+        }
+        emails.add(email);
+
+        if (roll) {
+          if (rolls.has(roll)) {
+            toast.error(`Duplicate roll number in list: ${student.rollNumber}`);
+            return;
+          }
+          rolls.add(roll);
+        }
+
+        if (phone) {
+          if (phones.has(phone)) {
+            toast.error(`Duplicate phone number in list: ${student.phoneNumber}`);
+            return;
+          }
+          phones.add(phone);
+        }
+
+        const dupEmail = allUsers.find(u => u.email.toLowerCase() === email && u.uid !== student.uid);
+        if (dupEmail) {
+          toast.error(`Email already exists in database: ${student.email}`);
+          return;
+        }
+
+        if (roll) {
+          const dupRoll = allUsers.find(u => u.rollNumber?.toLowerCase() === roll && u.uid !== student.uid);
+          if (dupRoll) {
+            toast.error(`Roll number already exists in database: ${student.rollNumber}`);
+            return;
+          }
+        }
+
+        if (phone) {
+          const dupPhone = allUsers.find(u => u.phoneNumber === phone && u.uid !== student.uid);
+          if (dupPhone) {
+            toast.error(`Phone number already exists in database: ${student.phoneNumber}`);
+            return;
+          }
+        }
+      }
+
+      let savedCount = 0;
+      for (const student of students) {
         const isNew = student.uid?.startsWith('temp_');
         const userUid = isNew ? doc(collection(db, 'users')).id : student.uid!;
 
@@ -4449,7 +4669,6 @@ function AdminStudentsView({ allUsers, departments, onBack }: { allUsers: User[]
       toast.error("Failed to save changes: " + err.message);
     }
   };
-
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -4458,6 +4677,9 @@ function AdminStudentsView({ allUsers, departments, onBack }: { allUsers: User[]
           <p className="text-gray-500 font-mono text-xs uppercase">Inline Spreadsheet Editor & Importer</p>
         </div>
         <div className="flex gap-3">
+          <Button variant="outline" onClick={onBack} className="text-xs uppercase tracking-widest font-bold">
+            <ChevronLeft className="w-4 h-4 mr-1" /> Back
+          </Button>
           <input
             type="file"
             accept=".csv,.tsv,.txt"
@@ -4896,13 +5118,49 @@ function AdminTeachersView({ allUsers, departments, onBack }: { allUsers: User[]
 
   const saveChanges = async () => {
     try {
-      let savedCount = 0;
+      const emails = new Set<string>();
+      const phones = new Set<string>();
+
       for (const teacher of teachers) {
-        if (!teacher.email) {
+        const email = (teacher.email || '').trim().toLowerCase();
+        const phone = (teacher.phoneNumber || '').trim();
+
+        if (!email) {
           toast.error("All rows must have an email address.");
           return;
         }
 
+        if (emails.has(email)) {
+          toast.error(`Duplicate email in list: ${teacher.email}`);
+          return;
+        }
+        emails.add(email);
+
+        if (phone) {
+          if (phones.has(phone)) {
+            toast.error(`Duplicate phone number in list: ${teacher.phoneNumber}`);
+            return;
+          }
+          phones.add(phone);
+        }
+
+        const dupEmail = allUsers.find(u => u.email.toLowerCase() === email && u.uid !== teacher.uid);
+        if (dupEmail) {
+          toast.error(`Email already exists in database: ${teacher.email}`);
+          return;
+        }
+
+        if (phone) {
+          const dupPhone = allUsers.find(u => u.phoneNumber === phone && u.uid !== teacher.uid);
+          if (dupPhone) {
+            toast.error(`Phone number already exists in database: ${teacher.phoneNumber}`);
+            return;
+          }
+        }
+      }
+
+      let savedCount = 0;
+      for (const teacher of teachers) {
         const isNew = teacher.uid?.startsWith('temp_');
         const userUid = isNew ? doc(collection(db, 'users')).id : teacher.uid!;
 
@@ -4934,6 +5192,9 @@ function AdminTeachersView({ allUsers, departments, onBack }: { allUsers: User[]
           <p className="text-gray-500 font-mono text-xs uppercase">Inline Spreadsheet Editor & Importer</p>
         </div>
         <div className="flex gap-3">
+          <Button variant="outline" onClick={onBack} className="text-xs uppercase tracking-widest font-bold">
+            <ChevronLeft className="w-4 h-4 mr-1" /> Back
+          </Button>
           <input
             type="file"
             accept=".csv,.tsv,.txt"
@@ -5353,13 +5614,18 @@ function AdminTestsView({ allUsers, departments, onBack }: { allUsers: any[]; de
           <h2 className="text-3xl font-black uppercase tracking-tighter text-[#141414]">Interactive Diagnostic Test Runner</h2>
           <p className="text-gray-500 font-mono text-xs uppercase">Run client-side & logic validation suites live in Render production environment</p>
         </div>
-        <Button 
-          onClick={runDiagnostics} 
-          disabled={isRunning}
-          className="bg-[#141414] hover:bg-black text-white font-bold uppercase tracking-wider text-xs px-6 h-12 shadow-[4px_4px_0px_0px_#F27D26] hover:shadow-none hover:translate-x-0.5 hover:translate-y-0.5 transition-all"
-        >
-          {isRunning ? "Running Diagnostics..." : "Run Diagnostic Tests"}
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={onBack} className="text-xs uppercase tracking-widest font-bold">
+            <ChevronLeft className="w-4 h-4 mr-1" /> Back
+          </Button>
+          <Button 
+            onClick={runDiagnostics} 
+            disabled={isRunning}
+            className="bg-[#141414] hover:bg-black text-white font-bold uppercase tracking-wider text-xs px-6 h-12 shadow-[4px_4px_0px_0px_#F27D26] hover:shadow-none hover:translate-x-0.5 hover:translate-y-0.5 transition-all"
+          >
+            {isRunning ? "Running Diagnostics..." : "Run Diagnostic Tests"}
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
