@@ -444,7 +444,20 @@ export default function App() {
     }
     setIsLoggingIn(true);
 
-    const matchedUser = allUsers.find(u => u.email === loginEmail);
+    let matchedUser = allUsers.find(u => u.email === loginEmail);
+    if (!matchedUser) {
+      try {
+        const q = query(collection(db, 'users'), where('email', '==', loginEmail));
+        const querySnapshot = await getDocs(q);
+        if (!querySnapshot.empty) {
+          const docSnap = querySnapshot.docs[0];
+          matchedUser = { uid: docSnap.id, ...docSnap.data() } as User;
+        }
+      } catch (err) {
+        console.error("Failed to fetch user by email during local login:", err);
+      }
+    }
+
     const emailPrefix = loginEmail.split('@')[0];
     if (matchedUser && (loginPassword === matchedUser.password || loginPassword === emailPrefix || loginPassword === 'password' || loginPassword === matchedUser.role || (loginEmail === 'admin@mru.ac.in' && loginPassword === 'admin'))) {
       sessionStorage.setItem('localUser', JSON.stringify(matchedUser));
